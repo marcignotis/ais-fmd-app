@@ -276,6 +276,47 @@ def trend_bars(df: pd.DataFrame) -> go.Figure:
     return figure
 
 
+def sponsorship_trend_bars(df: pd.DataFrame) -> go.Figure:
+    """
+    Sponsorship goal against amount raised, across semesters.
+
+    Same grouped-bar shape as `trend_bars`, coloured for income rather than
+    spending (green, not orange) since raised sponsorship money is income,
+    not an expense. A semester with no goal set simply has no blue bar for
+    that x position -- Plotly skips a NaN value rather than drawing a $0 bar,
+    which is the correct reading: "no target", not "target of zero".
+    """
+    if df.empty:
+        return empty_figure("No sponsorship history yet.")
+
+    figure = go.Figure()
+    figure.add_trace(
+        go.Bar(
+            name="Goal",
+            x=df["Semester"],
+            y=df["Goal"],
+            marker=dict(color=theme.BUDGET),
+            hovertemplate="Goal: $%{y:,.2f}<extra></extra>",
+        )
+    )
+    figure.add_trace(
+        go.Bar(
+            name="Raised",
+            x=df["Semester"],
+            y=df["Raised"],
+            marker=dict(color=theme.INCOME),
+            hovertemplate="Raised: $%{y:,.2f}<extra></extra>",
+        )
+    )
+    figure.update_layout(
+        barmode="group",
+        height=340,
+        yaxis=dict(title="Dollars", tickprefix="$", separatethousands=True),
+        xaxis=dict(title=None),
+    )
+    return figure
+
+
 def category_treemap(df: pd.DataFrame, *, label_column: str, value_column: str) -> go.Figure:
     """Area-encoded spend -- useful when there are more categories than bars can hold."""
     if df.empty:

@@ -21,6 +21,7 @@ from ais_fmd import auth
 from ais_fmd.config.categories import BUDGETED_COMMITTEE_IDS, committee_name
 from ais_fmd.data import repositories as repo
 from ais_fmd.domain import budgets as budget_domain
+from ais_fmd.domain import sponsorship as sponsorship_domain
 from ais_fmd.domain.terms import (
     attach_semester,
     default_semester_index,
@@ -113,6 +114,38 @@ shell.metric_row(
 
 if prior:
     st.caption(f"Deltas compare against {prior}.")
+
+# --- Revenue tracking: sponsorship goal (M20), condensed ---------------------
+#
+# Dues collection has its own dedicated page (views/Dues.py) with a roster
+# comparison and a collection curve -- a fuller treatment than one line has
+# room for. Sponsorship doesn't need that much space here: it is one
+# committee's ledger line, not an org-wide figure like the headline metrics
+# above, so it reads as a single caption-plus-bar note attached to them
+# rather than a full peer section with its own subheader and metric row. The
+# fuller breakdown (goal vs. raised per past semester) lives on the Treasury
+# page's "Sponsorship history" table and chart instead.
+
+sponsorship_summary = sponsorship_domain.summarize(
+    bundle.transactions, bundle.terms, selected_semester
+)
+
+if sponsorship_summary.goal is None:
+    shell.say(
+        f"Sponsorship raised this term: **${sponsorship_summary.raised:,.2f}** "
+        f"({sponsorship_summary.payment_count} payment(s)) — no goal set. "
+        f"Set one on the Treasury page (Terms tab).",
+        caption=True,
+    )
+else:
+    shell.say(
+        f"🎯 Sponsorship: **${sponsorship_summary.raised:,.2f}** of "
+        f"${sponsorship_summary.goal:,.2f} goal — "
+        f"**{sponsorship_summary.percent_of_goal:.0f}%** "
+        f"({sponsorship_summary.payment_count} payment(s))",
+        caption=True,
+    )
+    st.progress(min(sponsorship_summary.percent_of_goal / 100, 1.0))
 
 st.markdown('<hr class="ais-rule" />', unsafe_allow_html=True)
 

@@ -304,6 +304,10 @@ class SqliteBackend(Backend):
                 ("locked_by", "TEXT"),
                 ("dues_rates", "TEXT"),
                 ("dues_rates_verified", "INTEGER NOT NULL DEFAULT 0"),
+                # Sponsorship dollar goal for the term. NULL = no goal set yet,
+                # distinct from 0 (a goal of literally $0), same reasoning as
+                # dues_rates being nullable above.
+                ("sponsorship_goal", "REAL"),
             ],
         }
         for table, columns in additions.items():
@@ -408,6 +412,53 @@ class SqliteBackend(Backend):
                     field=term_id,
                     old_value=f"{previous or '(none)'}{'' if was_verified else ' (unconfirmed)'}",
                     new_value=f"{rates or '(none)'}{'' if verified else ' (unconfirmed)'}",
+                )
+                connection.commit()
+                result.updated = 1
+        except sqlite3.Error as exc:
+            result.error = f"{type(exc).__name__}: {exc}"
+        return result
+
+    def set_term_sponsorship_goal(
+        self, term_id: str, goal: float | None, actor: str
+    ) -> UpdateResult:
+        """
+        Record the sponsorship dollar goal for a term.
+
+        `goal=None` clears it (shows as "no goal set" rather than "$0 goal" --
+        those mean different things to a treasurer). Audited the same way as
+        `set_term_dues_rates`: this is a number a committee will be measured
+        against, so who set it and what it replaced both need to survive.
+        """
+        result = UpdateResult()
+        try:
+            with self._connect() as connection:
+                row = connection.execute(
+                    "SELECT sponsorship_goal FROM terms WHERE TermID = ?", (term_id,)
+                ).fetchone()
+                if row is None:
+                    result.error = f"Term {term_id} does not exist."
+                    return result
+
+                previous = row["sponsorship_goal"]
+                if (previous is None and goal is None) or (
+                    previous is not None and goal is not None and float(previous) == float(goal)
+                ):
+                    result.unchanged = 1
+                    return result
+
+                connection.execute(
+                    "UPDATE terms SET sponsorship_goal = ? WHERE TermID = ?",
+                    (goal, term_id),
+                )
+                self._audit(
+                    connection,
+                    transaction_id=None,
+                    action="sponsorship_goal",
+                    actor=actor,
+                    field=term_id,
+                    old_value="(none)" if previous is None else f"${previous:,.2f}",
+                    new_value="(none)" if goal is None else f"${goal:,.2f}",
                 )
                 connection.commit()
                 result.updated = 1

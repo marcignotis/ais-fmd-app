@@ -25,7 +25,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from ais_fmd.config.categories import BUDGETED_COMMITTEE_IDS, COMMITTEES
 from ais_fmd.data.sqlite_backend import SqliteBackend
-from ais_fmd.domain.categorize.merchants import MerchantMemory
 from ais_fmd.domain.categorize.pipeline import categorize_frame
 from ais_fmd.domain.dedupe import split_new_and_duplicate
 from ais_fmd.domain.dues import CONFIRMED_DUES_RATES, format_rates, schedule_from_terms
@@ -137,9 +136,8 @@ def main() -> int:
     bootstrap_reference_data(backend, parsed.rows)
 
     # --- 3. Categorize ------------------------------------------------------
-    memory = MerchantMemory.from_records(backend.fetch_merchants().to_dict("records"))
     schedule = schedule_from_terms(backend.fetch_terms())
-    categorized, run = categorize_frame(parsed.rows, memory, dues=schedule)
+    categorized, run = categorize_frame(parsed.rows, dues=schedule)
     print(f"[3] categorized    : {run.summary_line()}")
     print(f"    coverage       : {run.coverage:.1f}%  (model calls: {run.rows_sent_to_model} rows)")
 

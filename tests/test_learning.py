@@ -173,16 +173,27 @@ def test_card_signals_are_excluded_from_cross_era_fitting():
 
 def test_a_signal_that_is_usually_wrong_learns_a_low_weight():
     """
-    The point of fitting. A bar merchant looks like Membership, but if humans
+    The point of fitting. A food merchant looks like Meeting Food, but if humans
     keep filing those under Consulting the weight must fall.
+
+    This test used to make the same point with the bar-merchant signal, which
+    was the real-world instance of it: fitted against actual labels that signal
+    scored 38% precision and learned a weight of 0.00. It has since been removed
+    from scoring on exactly that evidence, so the assertion moved to a signal
+    that still exists. The behaviour under test -- a signal that consistently
+    disagrees with humans must lose its weight -- is unchanged, and is what
+    justified deleting the other one.
     """
-    labels = [_label(f"PURCHASE AUTHORIZED ON 09/16 MACDINTONS #{i} FL", 7) for i in range(10)]
+    labels = [
+        _label(f"PURCHASE AUTHORIZED ON 09/16 PUBLIX #{i} GAINESVILLE FL", 7)
+        for i in range(10)
+    ]
     fitted = fit_weights(labels)
-    bar = fitted.stats.get(("bar-merchant", 5))
-    assert bar is not None
-    assert bar.fired == 10
-    assert bar.agreed == 0
-    assert bar.learned_weight == 0.0
+    food = fitted.stats.get(("food-merchant", 8))
+    assert food is not None
+    assert food.fired == 10
+    assert food.agreed == 0
+    assert food.learned_weight == 0.0
 
 
 def test_a_reliable_signal_learns_a_high_weight():
@@ -196,10 +207,10 @@ def test_a_reliable_signal_learns_a_high_weight():
 
 
 def test_rare_signals_are_not_trusted():
-    fitted = fit_weights([_label("PURCHASE AUTHORIZED ON 09/16 MACDINTONS FL", 5)])
-    bar = fitted.stats.get(("bar-merchant", 5))
-    assert not bar.trustworthy
-    assert fitted.weight_for("bar-merchant", 5, fallback=2.5) == 2.5
+    fitted = fit_weights([_label("PURCHASE AUTHORIZED ON 09/16 PUBLIX GAINESVILLE FL", 8)])
+    food = fitted.stats.get(("food-merchant", 8))
+    assert not food.trustworthy, "one observation is not evidence"
+    assert fitted.weight_for("food-merchant", 8, fallback=1.5) == 1.5
 
 
 # --- Evaluation --------------------------------------------------------------
@@ -309,15 +320,21 @@ def test_precedent_retrieval_prefers_the_same_merchant():
 
 
 def test_context_names_the_current_card_roster():
+    """Read from config/card_roster.json, the file the categorizer itself uses."""
     context = build_context([])
-    assert "8313" in context and "5718" in context
-    assert "Annalee" in context and "Grant" in context
+    assert "0594" in context and "4831" in context
+    assert "Membership VP" in context and "Consulting VP" in context
 
 
-def test_context_warns_that_cards_are_not_certain():
-    """The prompt must carry the caveat treasury gave, or the model over-trusts it."""
+def test_context_leaves_out_a_previous_cohorts_cards():
+    """8408 was the 2024-2026 Consulting card; briefing the model on it now would mislead."""
+    assert "8408" not in build_context([])
+
+
+def test_context_says_confirmed_cards_are_already_decided():
+    """A confirmed card decides its row before the model is ever asked."""
     context = build_context([]).lower()
-    assert "not a certainty" in context or "wrong card" in context
+    assert "already booked" in context
 
 
 def test_prompt_includes_precedents_for_the_row_being_judged():

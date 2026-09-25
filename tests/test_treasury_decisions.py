@@ -15,6 +15,7 @@ Development or Membership.
 
 from __future__ import annotations
 
+import json
 from datetime import date
 from decimal import Decimal
 
@@ -455,84 +456,136 @@ def test_no_card_was_guessed_from_the_apps_own_output():
     assert INFERRED_CARDS == {}
 
 
-def test_spend_after_the_cohort_ended_is_flagged():
-    """
-    A reissued card keeps voting, just for the wrong committee.
+# --- 2026-09-23: the card decides, and the Fall 2026 cards ------------------
+#
+# "Apply the cards ruling -- make sure that it is the most highly valued one
+# out of all of the categorizations ... we should not hard code the consulting
+# one, that was more for the previous year ... the new cards are overriding the
+# old ones." Also: "the US Mobile payment card was mine, so mark that down as
+# treasury", and "get rid of ... the merchant rule. Things are going to be too
+# varying ... consulting food and meeting food, there's going to be a lot of
+# overlap."
 
-    Nothing in a bank statement distinguishes a card that changed hands, so the
-    only way this surfaces is by noticing the roster is older than the spend.
-    """
+FALL_2026_CARDS = {
+    "4831": 7,  # Consulting -- E-Board Meeting 05 notes, 09/21/26
+    "0594": 5,  # Membership
+    "7101": 5,  # Membership
+    "3526": 4,  # President
+    "3466": 2,  # Treasury -- the treasurer's own card (US Mobile), 2026-09-23
+}
+
+
+def test_the_fall_2026_cards_are_on_the_roster():
+    from ais_fmd.domain.categorize.scoring import current_era, load_card_roster
+
+    roster = load_card_roster()
+    era = current_era()
+    for card, committee in FALL_2026_CARDS.items():
+        assert card in roster, f"card {card} is missing from card_roster.json"
+        assignment = roster[card]
+        assert assignment.committee_id == committee, card
+        assert assignment.verified, f"card {card} must be confirmed"
+        assert assignment.era == era, f"card {card} must belong to the current cohort"
+
+
+def test_the_consulting_card_is_not_carried_over_from_last_year():
+    """8408 books 2024-2026 statements only; from 2026-08-01 it decides nothing."""
+    this_year = row("PURCHASE AUTHORIZED ON 09/18 ZOOM.US CARD 8408", -120.00)
+    this_year["transaction_date"] = "2026-09-20"
+    last_year = dict(this_year, transaction_date="2025-09-20")
+    run = categorize_records([this_year, last_year])
+    assert run.classifications[0].committee_id != 7
+    assert run.classifications[1].committee_id == 7
+
+
+def test_a_membership_card_at_a_tuesday_food_run_is_membership():
+    """The reversal of the 2026-08-24 ruling that timing beats the card."""
+    record = row("PURCHASE AUTHORIZED ON 09/01 SAMS CLUB #8155 GAINESVILLE FL CARD 0594", -133.07)
+    record["transaction_date"] = "2026-09-01"
+    run = categorize_records([record])
+    assert run.classifications[0].committee_id == 5
+
+
+def test_the_treasurers_card_is_treasury():
+    record = row("PURCHASE AUTHORIZED ON 08/09 US MOBILE WWW.USMOBILE. NY CARD 3466", -96.00)
+    record["transaction_date"] = "2026-08-10"
+    assert categorize_records([record]).classifications[0].committee_id == 2
+
+
+# --- The roster check reads the roster file ---------------------------------
+
+def _roster_file(tmp_path, cards: dict, *, era="2026-2027", start="2026-08-01", end="2027-07-31"):
+    path = tmp_path / "card_roster.json"
+    body = {"_current_era": era, "_eras": {era: {"start": start, "end": end}}}
+    body.update({card: {"committee": c, "holder": "VP", "verified": True, "era": era}
+                 for card, c in cards.items()})
+    path.write_text(json.dumps(body), encoding="utf-8")
+    return path
+
+
+def _purchase(card: str, when: str) -> pd.DataFrame:
+    return pd.DataFrame([{
+        "TransactionID": 1, "transaction_date": when, "amount": -84.10, "budget_category": None,
+        "details": f"PURCHASE AUTHORIZED ON 09/19 PUBLIX GAINESVILLE FL CARD {card}",
+    }])
+
+
+def test_spend_on_known_cards_is_not_flagged(tmp_path):
     from ais_fmd.domain.quality import check_card_roster_era
 
-    transactions = pd.DataFrame(
-        [
-            {
-                "TransactionID": 1,
-                "transaction_date": "2026-09-20",  # Fall 2026: new cohort
-                "details": "PURCHASE AUTHORIZED ON 09/19 PUBLIX GAINESVILLE FL CARD 8313",
-                "amount": -84.10,
-                "budget_category": 5,
-            }
-        ]
-    )
-    issue = check_card_roster_era(transactions, pd.DataFrame(), pd.DataFrame())
+    path = _roster_file(tmp_path, {"0594": 5})
+    issue = check_card_roster_era(_purchase("0594", "2026-09-20"), pd.DataFrame(), pd.DataFrame(),
+                                  roster_path=path)
+    assert issue is None
+
+
+def test_an_unidentified_card_in_current_spending_is_named(tmp_path):
+    """What the real Fall 2026 statement looked like before the cards were collected."""
+    from ais_fmd.domain.quality import check_card_roster_era
+
+    path = _roster_file(tmp_path, {"0594": 5})
+    issue = check_card_roster_era(_purchase("3466", "2026-09-20"), pd.DataFrame(), pd.DataFrame(),
+                                  roster_path=path)
     assert issue is not None
     assert issue.count == 1
-    assert "8408" in issue.detail, "the certainty rule is the one to warn about"
+    assert "3466" in issue.detail
+    assert "card_roster.json" in issue.detail, "point at the file, not at Python"
 
 
-def test_spend_inside_the_cohort_is_not_flagged():
+def test_a_previous_cohorts_card_counts_as_unidentified_now(tmp_path):
+    """A card from the last cohort is not evidence for this one, so it is flagged."""
     from ais_fmd.domain.quality import check_card_roster_era
 
-    transactions = pd.DataFrame(
-        [
-            {
-                "TransactionID": 1,
-                "transaction_date": "2026-03-04",  # still the 2024-2026 cohort
-                "details": "PURCHASE AUTHORIZED ON 03/03 PUBLIX GAINESVILLE FL CARD 8313",
-                "amount": -84.10,
-                "budget_category": 5,
-            }
-        ]
-    )
-    assert check_card_roster_era(transactions, pd.DataFrame(), pd.DataFrame()) is None
+    path = _roster_file(tmp_path, {"0594": 5})
+    issue = check_card_roster_era(_purchase("8408", "2026-09-20"), pd.DataFrame(), pd.DataFrame(),
+                                  roster_path=path)
+    assert issue is not None and "8408" in issue.detail
 
 
-def test_a_completed_handover_is_reported_differently():
+def test_spend_after_the_cohort_ended_is_flagged(tmp_path):
     """
-    What the real Fall 2026 statement actually looked like.
-
-    Not one card in it appears on the roster — cards 3466 and 3526 against a
-    roster of 3568/5718/8313/8408. Nothing is mis-booked, because an unknown
-    card contributes no evidence; the card signal is simply inert. That is
-    quieter than a wrong assignment and easier to miss, so it gets its own
-    message rather than silence.
+    Cards stop applying when their cohort ends, so a roster nobody renewed
+    leaves new spending with no card evidence -- and says so.
     """
     from ais_fmd.domain.quality import check_card_roster_era
 
-    transactions = pd.DataFrame(
-        [
-            {
-                "TransactionID": 1,
-                "transaction_date": "2026-08-17",
-                "details": "PURCHASE AUTHORIZED ON 08/15 TST*MACDINTONS GAI CARD 3526",
-                "amount": -298.96,
-                "budget_category": 5,
-            },
-            {
-                "TransactionID": 2,
-                "transaction_date": "2026-08-10",
-                "details": "PURCHASE AUTHORIZED ON 08/09 US MOBILE CARD 3466",
-                "amount": -96.00,
-                "budget_category": None,
-            },
-        ]
-    )
-    issue = check_card_roster_era(transactions, pd.DataFrame(), pd.DataFrame())
+    path = _roster_file(tmp_path, {"0594": 5})
+    issue = check_card_roster_era(_purchase("0594", "2027-09-20"), pd.DataFrame(), pd.DataFrame(),
+                                  roster_path=path)
     assert issue is not None
-    assert issue.count == 2
-    assert "3466" in issue.detail and "3526" in issue.detail
-    assert "no card" in issue.title.lower()
+    assert "ended" in issue.title.lower()
+    assert "_current_era" in issue.detail
+
+
+def test_an_unreadable_roster_is_high_severity(tmp_path):
+    from ais_fmd.domain.quality import check_card_roster_era
+
+    path = tmp_path / "card_roster.json"
+    path.write_text("{ not json", encoding="utf-8")
+    issue = check_card_roster_era(_purchase("0594", "2026-09-20"), pd.DataFrame(), pd.DataFrame(),
+                                  roster_path=path)
+    assert issue is not None
+    assert issue.severity == "high"
 
 
 def test_transfers_without_a_card_are_not_a_roster_problem():

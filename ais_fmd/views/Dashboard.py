@@ -89,6 +89,7 @@ shell.metric_row(
             "value": totals["income"],
             "delta": totals["income"] - prior_totals["income"],
             "trend": income_trend,
+            "color": theme.active().income,
         },
         {
             "label": "Expenses",
@@ -96,6 +97,7 @@ shell.metric_row(
             "delta": totals["expenses"] - prior_totals["expenses"],
             "inverse": True,  # F11
             "trend": expense_trend,
+            "color": theme.active().expense,
         },
         {
             "label": "Net",
@@ -146,7 +148,13 @@ else:
     if banner_parts:
         st.markdown(" &nbsp; ".join(banner_parts), unsafe_allow_html=True)
 
-    chart_column, table_column = st.columns([3, 2])
+    # FINDING (visual). At [3, 2] the table got two fifths of the row and had to
+    # render six columns in it, so `% Spent` and `Status` were cut off mid-cell
+    # -- and `Status` is the one column that says whether a committee is in
+    # trouble. Evening the split and dropping `Remaining`, which is just
+    # Budget - Spent and is already the gap between the two bars in the chart
+    # beside it, leaves every remaining column its full width.
+    chart_column, table_column = st.columns([1, 1])
     with chart_column:
         shell.chart(charts.budget_bullet(summary), key="budget_bullet")
     with table_column:
@@ -155,13 +163,14 @@ else:
             lambda value: "—" if value is None or value != value else f"{value:.1f}%"
         )
         shell.dataframe(
-            display[["Committee_Name", "Budget", "Spent", "Remaining", "% Spent", "Status"]].rename(
+            display[["Committee_Name", "Budget", "Spent", "% Spent", "Status"]].rename(
                 columns={"Committee_Name": "Committee"}
             ),
             column_config={
                 "Budget": st.column_config.NumberColumn(format="$%.2f"),
                 "Spent": st.column_config.NumberColumn(format="$%.2f"),
-                "Remaining": st.column_config.NumberColumn(format="$%.2f"),
+                "% Spent": st.column_config.TextColumn(width="small"),
+                "Status": st.column_config.TextColumn(width="small"),
             },
             height=charts._height(len(display)),
         )
@@ -182,46 +191,83 @@ if committee_filter:
     if target_id is not None:
         scoped = scoped[scoped["budget_category"] == target_id]
 
-waterfall_column, split_column = st.columns([3, 2])
+# FINDING (visual). This section used to be one row: the waterfall in three
+# fifths of it, and the income/expense breakdowns squeezed into the other two
+# as a pair of tabs. That cost twice over. The breakdowns had about 400px to
+# render category names like "Professional Development", so the labels ate most
+# of the width the bars needed -- and putting them behind tabs meant only ever
+# seeing one of the two, on a page whose entire subject is income against
+# expenditure. They are the comparison; hiding half of it behind a click is the
+# wrong default.
+#
+# The waterfall now takes the full width, and the two breakdowns sit side by
+# side beneath it, both visible, each with roughly half the page instead of a
+# fifth of it.
+# FINDING (correctness). The waterfall ran Income, the top eight committees,
+# then a bar labelled "Net" -- but that bar is a Plotly `total`, so it shows
+# wherever the preceding steps happen to land, not the semester's actual
+# net. Two things were being dropped on the way there: every committee past
+# the eighth, and all unbudgeted spend, since `spending_by_committee` is
+# called with `budgeted_only=True`. For Fall 2026 that put the chart's "Net"
+# at -$3,301.50 against a real net of -$4,301.22 -- a $999.72 gap, shown
+# directly beneath a KPI tile displaying the correct figure. Two different
+# nets on one screen, and the wrong one was the one with a story attached.
+#
+# Everything not itemised is now carried in a single "Other" step, so the
+# bars sum to the real net by construction rather than by luck.
+spending = budget_domain.spending_by_committee(scoped, budgeted_only=True)
+ITEMISED = 5
+top = spending.head(ITEMISED)
+# Whatever the itemised bars do not account for: the committees past the
+# cut, plus expenses against no budget at all.
+other = totals["expenses"] - float(top["Spent"].sum())
 
-with waterfall_column:
-    spending = budget_domain.spending_by_committee(scoped, budgeted_only=True)
-    labels = ["Income"] + spending["Committee_Name"].head(8).tolist() + ["Net"]
-    values = (
-        [totals["income"]]
-        + [-float(value) for value in spending["Spent"].head(8)]
-        + [0.0]
-    )
-    measures = ["relative"] + ["relative"] * min(8, len(spending)) + ["total"]
+labels = ["Income"] + top["Committee_Name"].tolist()
+values = [totals["income"]] + [-float(value) for value in top["Spent"]]
+if round(other, 2) != 0:
+    labels.append("Other")
+    values.append(-other)
+labels.append("Net")
+values.append(0.0)
+measures = ["relative"] * (len(labels) - 1) + ["total"]
+
+shell.chart(
+    charts.waterfall(labels, values, measures, title=f"{selected_semester} flow"),
+    key="waterfall",
+)
+shell.say(
+    f"Income less the {ITEMISED} largest committees; everything else — "
+    f"smaller committees and unbudgeted spend — is grouped as Other.",
+    caption=True,
+)
+
+expense_column, income_column = st.columns([1, 1])
+
+with expense_column:
+    st.markdown("#### Expenses by category")
+    expense_split = budget_domain.categorize_flow(scoped, budget_domain.EXPENSE)
     shell.chart(
-        charts.waterfall(labels, values, measures, title=f"{selected_semester} flow"),
-        key="waterfall",
+        charts.ranked_bar(
+            expense_split,
+            label_column="Category",
+            value_column="Amount",
+            color=theme.active().expense,
+        ),
+        key="expense_split",
     )
 
-with split_column:
-    tab_expense, tab_income = st.tabs(["Expenses", "Income"])
-    with tab_expense:
-        expense_split = budget_domain.categorize_flow(scoped, budget_domain.EXPENSE)
-        shell.chart(
-            charts.ranked_bar(
-                expense_split,
-                label_column="Category",
-                value_column="Amount",
-                color=theme.EXPENSE,
-            ),
-            key="expense_split",
-        )
-    with tab_income:
-        income_split = budget_domain.categorize_flow(scoped, budget_domain.INCOME)
-        shell.chart(
-            charts.ranked_bar(
-                income_split,
-                label_column="Category",
-                value_column="Amount",
-                color=theme.INCOME,
-            ),
-            key="income_split",
-        )
+with income_column:
+    st.markdown("#### Income by source")
+    income_split = budget_domain.categorize_flow(scoped, budget_domain.INCOME)
+    shell.chart(
+        charts.ranked_bar(
+            income_split,
+            label_column="Category",
+            value_column="Amount",
+            color=theme.active().income,
+        ),
+        key="income_split",
+    )
 
 st.markdown('<hr class="ais-rule" />', unsafe_allow_html=True)
 
@@ -245,12 +291,21 @@ with burn_column:
     if at_risk.empty:
         shell.empty_state("Nothing projected to overrun", "Every committee finishes within budget at the current pace.")
     else:
+        # FINDING (visual). `Note` carried sentences -- "Projected to exhaust
+        # before term end" -- in the narrowest column on the page, so every row
+        # ended in an ellipsis. The sentence only ever takes two values, and
+        # both fit in a word once the column is named for what it reports.
+        compact = at_risk.copy()
+        compact["Risk"] = compact["Note"].map(
+            lambda note: "Over budget" if note == "Already over budget" else "Will exhaust"
+        )
         shell.dataframe(
-            at_risk[["Committee_Name", "Daily Burn", "Projected Exhaustion", "Note"]].rename(
+            compact[["Committee_Name", "Daily Burn", "Projected Exhaustion", "Risk"]].rename(
                 columns={"Committee_Name": "Committee", "Daily Burn": "Per day"}
             ),
             column_config={
                 "Per day": st.column_config.NumberColumn(format="$%.2f"),
                 "Projected Exhaustion": st.column_config.DateColumn(format="MMM D, YYYY"),
+                "Risk": st.column_config.TextColumn(width="small"),
             },
         )

@@ -16,11 +16,17 @@ Two changes of substance from the original:
    list rather than an if/elif chain.
 
    That order has since been revised twice by treasury rulings (2026-08-24).
-   The exact tier now runs memo -> card 8408 -> dues -> reimbursement:
+   The exact tier now runs memo -> dues -> reimbursement:
    `rule_refund` is gone, because an outgoing transfer is a committee's
    expenditure rather than a ledger bucket, and the memo rule sits ahead of
    dues because the Fall 2026 rates collide with formal ticket amounts. Both
    are explained where the rules are defined.
+
+   Card numbers are no longer rules here at all (2026-09-23). A card on the
+   roster decides its row outright, ahead of everything in this module, but
+   the roster is data -- `config/card_roster.json`, scoped by officer cohort --
+   so it lives in `scoring.CardRegistry` rather than in hard-coded strings like
+   the old "card 8408" and "card 8313/5718" markers.
 
 Every function in this module is pure: same input, same output, no I/O. That is
 what makes them the highest-value tests in the repository.
@@ -182,25 +188,6 @@ NEVER_BAR_KEYWORDS: tuple[str, ...] = (
     "wm supercenter", "target", "costco", "sam's club",
 )
 
-CONSULTING_CARD_MARKER = "card 8408"
-
-# Debit cards assigned to specific officers, confirmed against treasury's
-# "Categorization Architecture" doc (the source spec this categorizer was
-# originally built from): Annalee (8313) and Grant (5718), both Membership.
-#
-# A transaction on one of these cards is that officer's committee spend BY
-# CARDHOLDER DEFAULT -- but only a default, not a certainty like the card
-# check in `rule_consulting`. Card issuance has been messy enough in practice
-# that meeting food has repeatedly been bought on the wrong person's card, so
-# this must never outrank `rule_meeting_food`: see the tier split below.
-# Treasury's own account of this ("we need to build in the logic that
-# sometimes people's cards were used to buy things for other committees")
-# means even this ordering is a best-effort default, not a closed case --
-# the Review Queue remains where a treasurer corrects the individual
-# exceptions this cannot see, and a recurring exception can be captured
-# permanently as a merchant-memory rule (which already outranks this).
-MEMBERSHIP_CARD_MARKERS: tuple[str, ...] = ("card 8313", "card 5718")
-
 MEETING_WEEKDAYS = frozenset({"Tuesday", "Wednesday"})
 
 COMMITTEE_PURPOSE: dict[int, str] = {
@@ -253,7 +240,32 @@ MEMO_COMMITTEE_KEYWORDS: tuple[tuple[tuple[str, ...], int, str], ...] = (
         14,
         "road trip",
     ),
+    # Added 2026-09-08 from the real Fall 2026 statement, where
+    # "MEMBERSHIP REIMBURSEMENT SOCIAL" fell all the way through to the model
+    # tier despite naming its committee in the memo.
+    (("social",), 5, "social"),
+    # "GBM" is General Body Meeting. The one occurrence in that statement --
+    # "GBM #1 MEETING FOOD REIMBURSEMENT" -- was already resolved, but only
+    # because "meeting food" happens to trip the food-merchant keyword. Naming
+    # it makes the obvious case deterministic instead of incidental.
+    (("gbm", "general body meeting"), 8, "GBM"),
 )
+
+# "membership" IS NOT IN THE TABLE ABOVE, and this is the important part.
+#
+# It is the obvious keyword to add after seeing "MEMBERSHIP REIMBURSEMENT
+# SOCIAL" fall through, and adding it would be a serious bug. Checked against
+# the real Fall 2026 statement: "membership" appears in **21 memos, 20 of them
+# incoming dues payments** -- "MEMBERSHIP DUES", "AIS FALL 26 MEMBERSHIP",
+# "MEMBERSHIP FEE". Everything in this table runs *ahead* of `rule_dues`, so a
+# "membership" keyword would book roughly $1,000 of dues revenue into the
+# Membership expense committee and strip the term attribution off every one of
+# those rows.
+#
+# "social" is safe for exactly the reason "membership" is not: it appears once,
+# on an outgoing transfer, and never in a dues memo. The test for a keyword
+# belonging here is not "does it name a committee" but "can it collide with
+# dues", and that has to be checked against real memos rather than assumed.
 
 # Dues memos are handled separately by `rule_dues_memo`, NOT here, and the
 # distinction is the whole design.
@@ -319,11 +331,7 @@ class Classification:
     purpose: str | None
     rule: str
     confidence: float
-    source: str  # "rule" | "merchant" | "llm" | "none"
-
-    @property
-    def budget_label(self) -> str:
-        return committee_label(self.committee_id) if self.committee_id else ""
+    source: str  # "rule" | "scored" | "llm" | "none" ("merchant" on rows stored before 2026-09-23)
 
     @property
     def is_assigned(self) -> bool:
@@ -489,7 +497,7 @@ def rule_reimbursement(record: dict) -> Classification | None:
     then it was a committee expenditure."
 
     So there is no default committee here any more. The memo is tried first;
-    failing that the row falls through to merchant memory and scoring like any
+    failing that the row falls through to the card roster and scoring like any
     other, and if nothing resolves it, a human is asked. That is a real loss of
     automatic coverage, and it is the correct trade: the previous coverage was
     manufactured by answering a question nobody had asked.
@@ -534,27 +542,6 @@ def rule_memo_committee(record: dict) -> Classification | None:
         f"{label.title()} ({direction} memo says '{keyword}')",
         confidence=1.0,
     )
-
-
-def rule_consulting(record: dict) -> Classification | None:
-    if CONSULTING_CARD_MARKER not in _text(record.get("details")):
-        return None
-    return _assign(7, f"Consulting ('{CONSULTING_CARD_MARKER}')", confidence=1.0)
-
-
-def rule_membership_card(record: dict) -> Classification | None:
-    """
-    Officer-assigned card (8313 or 5718). See MEMBERSHIP_CARD_MARKERS.
-
-    Confidence is 0.9, not 1.0: unlike the card check in `rule_consulting`,
-    this is a default inferred from cardholder assignment, not a certainty --
-    and it is deliberately positioned to lose to `rule_meeting_food` (see the
-    tier split at the bottom of this module).
-    """
-    text = _text(record.get("details"))
-    if not any(marker in text for marker in MEMBERSHIP_CARD_MARKERS):
-        return None
-    return _assign(5, "Membership (officer card 8313/5718)", confidence=0.9)
 
 
 def rule_dues(record: dict, schedule: DuesSchedule | None = None) -> Classification | None:
@@ -644,20 +631,11 @@ def rule_membership_bar(record: dict) -> Classification | None:
     return _assign(5, "Membership (bar or liquor merchant)", confidence=0.85)
 
 
-# Rules keyed on an unambiguous marker: a card number, an exact dues amount, the
-# sign of a transfer. These are certainties, not guesses -- which is why they
-# outrank merchant memory (see `pipeline.categorize_records`).
+# Rules keyed on an unambiguous marker: an exact dues amount, a memo, the sign
+# of a transfer. These are certainties, not guesses. The one certainty that
+# outranks them -- a card on the roster -- is data rather than code, and runs
+# ahead of this tier in `pipeline.categorize_records`.
 #
-# The spec is explicit about the strongest of them: "If Details contains
-# 'card 8408', categorize as Committee ID 7 immediately. Ignore all remaining
-# rules." A learned merchant mapping must not be able to override that.
-#
-# `rule_membership_card` is deliberately NOT here despite also being a card
-# check. Card 8408 (Consulting) is certain by design -- one person, one
-# purpose, per treasury's own account. Cards 8313/5718 (Membership) are not:
-# treasury confirmed meeting food has been bought on the wrong person's card
-# because of past card-issuance problems, so it belongs in the heuristic tier
-# below `rule_meeting_food`, not up here where nothing can override it.
 # ORDER. `rule_memo_committee` must precede `rule_dues`: from Fall 2026 dues are
 # $50/$65 and formal payments land near those amounts, so an amount collision is
 # expected and only the memo can break it. `rule_reimbursement` comes last
@@ -665,22 +643,17 @@ def rule_membership_bar(record: dict) -> Classification | None:
 # could not place, and must not pre-empt a rule that could have placed it.
 EXACT_RULES: tuple[Callable[[dict], Classification | None], ...] = (
     rule_memo_committee,
-    rule_consulting,
     rule_dues,
     rule_dues_memo,
     rule_reimbursement,
 )
 
-# Keyword, weekday, and card-default heuristics. Confident, but each beatable
-# by something more specific: a merchant mapping a human has confirmed
-# (runs ahead of this whole tier -- see `pipeline.categorize_records`), or,
-# within the tier, by a stronger heuristic listed first. Order matters here:
-# `rule_meeting_food` must run before `rule_membership_card` so that meeting
-# food bought on an officer's Membership card is still meeting food, not
-# reassigned to Membership by cardholder default.
+# Keyword and weekday heuristics. Confident, but each beatable by something
+# more specific listed first. The cardholder default that used to sit between
+# them (`rule_membership_card`, hard-coding cards 8313/5718) is gone: a card on
+# the roster now decides its row before any of these run.
 HEURISTIC_RULES: tuple[Callable[[dict], Classification | None], ...] = (
     rule_meeting_food,
-    rule_membership_card,
     rule_membership_bar,
 )
 
@@ -712,7 +685,6 @@ def exact_rules(
         return EXACT_RULES
     return (
         rule_memo_committee,
-        rule_consulting,
         partial(rule_dues, schedule=dues),
         rule_dues_memo,
         rule_reimbursement,
@@ -722,11 +694,6 @@ def exact_rules(
 def classify_exact(record: dict, *, dues: DuesSchedule | None = None) -> Classification:
     """Only the unambiguous rules. Returns UNMATCHED if none fire."""
     return first_match(record, exact_rules(dues))
-
-
-def classify_heuristic(record: dict) -> Classification:
-    """Only the keyword/weekday rules. Returns UNMATCHED if none fire."""
-    return first_match(record, HEURISTIC_RULES)
 
 
 def classify_deterministic(record: dict) -> Classification:

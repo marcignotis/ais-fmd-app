@@ -110,7 +110,8 @@ compare_with = st.multiselect(
 )
 
 figure = go.Figure()
-palette = [theme.ACCENT, theme.INCOME, theme.EXPENSE, theme.UNBUDGETED]
+_p = theme.active()
+palette = [_p.accent, _p.income, _p.expense, _p.unbudgeted]
 
 for index, semester in enumerate([selected] + compare_with):
     curve = dues_domain.collection_curve(bundle.transactions, bundle.terms, semester)
@@ -199,7 +200,7 @@ with chart_col:
             comparison.rename(columns={"Collected": "Amount"}),
             label_column="Semester",
             value_column="Amount",
-            color=theme.INCOME,
+            color=theme.active().income,
         ),
         key="dues_by_semester",
     )

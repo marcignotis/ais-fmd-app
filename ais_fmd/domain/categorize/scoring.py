@@ -18,6 +18,11 @@ opposing signals produce a low-confidence result that routes to the review
 queue instead of being quietly booked. That is the behaviour that was actually
 wanted: resolve the clear majority automatically, flag the genuine outliers.
 
+CHANGED 2026-09-23. The card-versus-meeting-food conflict above is no longer
+a conflict: treasury ruled that a confirmed card decides its row, so it is
+settled by `CardRegistry.certain` before scoring runs. Scoring now weighs the
+purchases whose card is not on the roster.
+
 CONFIDENCE IS NOT A RULE CONSTANT. In `predicates.py` each rule carries a fixed
 number (0.9, 0.85) that never changes regardless of what else is true about the
 row. Here confidence is computed per transaction from two things:
@@ -42,9 +47,11 @@ ledgers in Drive -- not from this table.
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from datetime import date
+from pathlib import Path
 
 from ...config.categories import COMMITTEE_BY_ID, committee_name
 from ..money import parse_amount
@@ -53,15 +60,16 @@ from .predicates import (
     Classification,
     looks_like_bar,
     looks_like_food_merchant,
+    record_date,
     weekday_from_details,
 )
 
 MEETING_WEEKDAYS = frozenset({"Tuesday", "Wednesday"})
 
 # Labels are tagged with the officer cohort they were decided under, because
-# card assignments do not survive a handover. Bump this when the roster turns
-# over so old card weights are not fitted against new cardholders.
-CURRENT_ERA = "2024-2026"
+# card assignments do not survive a handover. The cohort is no longer a
+# constant here: it is `_current_era` in config/card_roster.json, read by
+# `current_era()`, so starting a new cohort is one file edit.
 
 # Auto-apply at or above this; anything below routes to the review queue with
 # its proposal and evidence attached. Tuned against the real statement -- see
@@ -69,25 +77,50 @@ CURRENT_ERA = "2024-2026"
 AUTO_APPLY_THRESHOLD = 0.75
 
 # Weight scale: what "one unit" of evidence means.
-#   3.0  confirmed by a human or by treasury documentation
-#   2.0  strong structural signal (bar merchant, catering-sized food purchase)
-#   1.0  ordinary corroboration (food keyword, meeting weekday)
+#   2.0  strong structural signal (meeting weekday, food-on-a-meeting-day)
+#   1.0  ordinary corroboration (catering-sized amount)
 #   0.5  weak hint
-W_MERCHANT_MEMORY = 6.0   # a human already decided this exact merchant
-W_CARD_VERIFIED = 2.5     # treasury doc names the cardholder's committee
-W_CARD_UNVERIFIED = 0.6   # inferred only, must never beat a verified signal
-W_BAR_MERCHANT = 2.5
+#
+# REMOVED 2026-09-23: W_MERCHANT_MEMORY (6.0) and W_MERCHANT_HISTORY (2.0).
+# Treasury ruled that merchant memory comes out of categorization entirely:
+# the same merchant is bought from by different committees too often --
+# Consulting food and Meeting Food especially overlap at the same restaurants
+# -- for a merchant's past filings to say anything about the next one. See
+# `pipeline.categorize_records`.
 W_FOOD_MERCHANT = 1.5
 W_MEETING_WEEKDAY = 2.0
 W_CATERING_SIZED = 1.0    # a large food purchase looks like feeding a GBM
 W_INCIDENTAL_SIZED = 0.75  # a very small one does not
+# REMOVED: W_BAR_MERCHANT = 2.5 ("bars are Membership"). Measured precision
+# 38%, fitted weight 0.00. See the note in `collect_signals`.
 
 # Food AND a meeting weekday corroborate each other: either alone is weak, but
-# together they are the signature of a GBM food run. Treasury was explicit that
-# meeting food is identified by timing and amount rather than by whose card
-# paid, so this conjunction has to be able to out-vote a cardholder default --
-# see `test_meeting_food_outscores_the_cardholder_default`.
+# together they are the signature of a GBM food run -- on a purchase whose card
+# is not on the roster. A card on the roster is decided before scoring runs.
 W_MEETING_CONJUNCTION = 2.0
+
+# The most any combination of the signals above can put behind one reading: a
+# catering-sized food purchase on a meeting weekday.
+MAX_NON_CARD_EVIDENCE = (
+    W_FOOD_MERCHANT + W_MEETING_WEEKDAY + W_MEETING_CONJUNCTION + W_CATERING_SIZED
+)
+
+# THE CARD IS THE STRONGEST EVIDENCE THERE IS. Treasury ruling, 2026-09-23,
+# replacing both earlier ones (2026-08-24 "meeting food is identified by timing,
+# not by whose card paid", and 2026-09-08 "more emphasis on card", which raised
+# this 2.5 -> 4.0 so a card merely *contested* meeting food). A purchase on a
+# card treasury has confirmed for the current cohort belongs to that card's
+# committee, whatever the merchant, the weekday or the amount suggest.
+#
+# In the pipeline this is not a weight at all: `CardRegistry.certain` books the
+# row as an exact rule before scoring is consulted. The weight exists for
+# callers that score a record directly (weight fitting, diagnostics), and is
+# derived rather than chosen so it cannot quietly fall behind: at twice the
+# largest competing total plus one, a confirmed card beats a full meeting-food
+# reading by enough margin to clear the auto-apply gate on its own
+# (`test_a_confirmed_card_outweighs_everything_scoring_can_say`).
+W_CARD_VERIFIED = 2 * MAX_NON_CARD_EVIDENCE + 1.0
+W_CARD_UNVERIFIED = 0.6   # inferred only, must never beat a verified signal
 
 # A food purchase at or above this reads as catering for a meeting rather than
 # an incidental snack run.
@@ -114,42 +147,51 @@ class CardAssignment:
     committee_id: int
     holder: str = ""
     verified: bool = False
+    # The officer cohort this card was confirmed under, and the dates that
+    # cohort held its cards. A card only speaks for transactions inside its
+    # cohort's window: a new VP's card replaces the old one's rather than both
+    # voting, and a cohort nobody has renewed stops being evidence on its own
+    # end date instead of quietly booking the next cohort's spending.
+    era: str = ""
+    starts: date | None = None
+    ends: date | None = None
 
     @property
     def weight(self) -> float:
         return W_CARD_VERIFIED if self.verified else W_CARD_UNVERIFIED
 
+    def covers(self, when: date | None) -> bool:
+        """
+        Whether this assignment applies on `when`.
 
-# Confirmed against treasury's "Categorization Architecture" doc -- the document
-# this categorizer was originally specced from. These are the only card
-# assignments with a documented owner; every other card in the real statement is
-# undocumented and contributes no card signal at all (see HANDOFF P3).
-#
-# Card 8408 is handled by `rule_consulting` as a certainty and never reaches
-# scoring; it is listed here only so the registry is a complete picture.
-#
-# THESE ARE COHORT-SCOPED. Treasury, on the seven undocumented cards: "The cards
-# might change around with new VPs, I will input their numbers later." Card
-# numbers do not survive a handover -- a reissued card keeps looking like
-# evidence while pointing at the wrong committee, and card 8408 is worse than
-# the rest because `rule_consulting` treats it as a certainty that outranks
-# everything, including a human's merchant mapping. `ROSTER_ERA` records which
-# officer cohort these were confirmed under so
-# `quality.check_card_roster_era` can say so out loud when the cohort turns
-# over, rather than letting a stale roster quietly keep voting.
-ROSTER_ERA = CURRENT_ERA
-# Officers turn over between academic years, so the cohort ends when Summer
-# does -- not when classes start. Kept in step with the term boundary in
-# `load_real_statement.bootstrap_reference_data`: the real Fall 2026 statement
-# shows the new cohort already spending on 08-10, before the semester began.
-ROSTER_ERA_ENDS = date(2026, 7, 31)
+        An undated record is given the benefit of the doubt: it cannot be placed
+        in a cohort, and refusing it would silently drop the card from every
+        caller that scores a bare description.
+        """
+        if when is None:
+            return True
+        if self.starts is not None and when < self.starts:
+            return False
+        if self.ends is not None and when > self.ends:
+            return False
+        return True
 
-CONFIRMED_CARDS: dict[str, CardAssignment] = {
-    "8313": CardAssignment(5, "Annalee", verified=True),
-    "5718": CardAssignment(5, "Grant", verified=True),
-    "3568": CardAssignment(4, "Trent", verified=True),
-    "8408": CardAssignment(7, "Salena", verified=True),
-}
+
+# WHERE THE ROSTER LIVES. It used to be `CONFIRMED_CARDS`, a dict in this
+# module, which meant adding a card was a code change -- and cards turn over
+# every time the officers do. Run the real Fall 2026 statement through that
+# version and not one of its three cards (0594, 3526, 3466) was known, so the
+# card tier contributed nothing at all. The dict is gone rather than kept as a
+# fallback: with a confirmed card now deciding a row outright, silently falling
+# back to a stale copy of a previous cohort's cards is worse than having none.
+# A missing or unreadable file means no card evidence at all, and
+# `quality.check_card_roster_era` says so.
+#
+# `rule_consulting` ("card 8408 is Consulting, ignore everything else") is gone
+# for the same reason -- it hard-coded one cohort's card as a certainty, and 8408
+# belonged to the 2024-2026 Consulting VP. Every card, Consulting's included, is
+# now a roster entry scoped to its cohort.
+ROSTER_FILE = Path(__file__).resolve().parent.parent.parent / "config" / "card_roster.json"
 
 # Deliberately empty, and this is a decision rather than an omission.
 #
@@ -158,32 +200,144 @@ CONFIRMED_CARDS: dict[str, CardAssignment] = {
 # until they supply the real numbers. There is no honest guess available yet.
 # The only current-era evidence about those cards is this app's own
 # `budget_category`, which `categorize_frame` wrote at import time -- inferring
-# a roster from it would train the categorizer on its own output and harden its
-# existing mistakes into "evidence", which is the one thing the module docstring
-# above says never to do. The 2022-23 human labels cannot help either: they
-# belong to a different cohort with entirely different card numbers.
-#
-# The evidence that would justify filling this in is current-era human labels,
-# which `scripts/propose_card_roster.py` turns into candidate assignments as
-# soon as the review queue starts producing them.
+# a roster from it would train the categorizer on its own output and harden
+# its existing mistakes into "evidence", which is the one thing the module
+# docstring above says never to do.
 INFERRED_CARDS: dict[str, CardAssignment] = {}
+
+
+@dataclass(frozen=True)
+class RosterStatus:
+    """What the roster file says about cohorts, and whether it could be read."""
+
+    current_era: str = ""
+    era_starts: date | None = None
+    era_ends: date | None = None
+    error: str = ""
+
+
+def _parse_date(value: object) -> date | None:
+    if value in (None, ""):
+        return None
+    try:
+        return date.fromisoformat(str(value))
+    except ValueError:
+        return None
+
+
+def _read_roster(path: Path | None) -> tuple[dict, str]:
+    target = path or ROSTER_FILE
+    try:
+        raw = json.loads(target.read_text(encoding="utf-8"))
+    except OSError as exc:
+        return {}, f"could not read {target.name}: {exc.strerror or exc}"
+    except ValueError as exc:
+        return {}, f"{target.name} is not valid JSON: {exc}"
+    if not isinstance(raw, dict):
+        return {}, f"{target.name} must be a JSON object"
+    return raw, ""
+
+
+def _era_windows(raw: dict) -> dict[str, tuple[date | None, date | None]]:
+    windows: dict[str, tuple[date | None, date | None]] = {}
+    for name, bounds in (raw.get("_eras") or {}).items():
+        if isinstance(bounds, dict):
+            windows[str(name)] = (_parse_date(bounds.get("start")), _parse_date(bounds.get("end")))
+    return windows
+
+
+def roster_status(path: Path | None = None) -> RosterStatus:
+    """The current cohort and its window, for labels and the Data Quality check."""
+    raw, error = _read_roster(path)
+    era = str(raw.get("_current_era") or "")
+    starts, ends = _era_windows(raw).get(era, (None, None))
+    return RosterStatus(current_era=era, era_starts=starts, era_ends=ends, error=error)
+
+
+def current_era(path: Path | None = None) -> str:
+    """The officer cohort new labels are tagged with."""
+    return roster_status(path).current_era
+
+
+def load_card_roster(path: Path | None = None) -> dict[str, CardAssignment]:
+    """
+    The card roster, as data: `config/card_roster.json`.
+
+    Editable by whoever actually knows the answer, without touching Python and
+    without a deploy. Entries that do not parse are skipped rather than failing
+    the whole file, so one bad edit costs one card, not every card.
+    """
+    raw, _error = _read_roster(path)
+    windows = _era_windows(raw)
+
+    roster: dict[str, CardAssignment] = {}
+    for card, entry in raw.items():
+        # Underscore keys are documentation -- see the file's own _README.
+        if card.startswith("_") or not isinstance(entry, dict):
+            continue
+        try:
+            committee = int(entry["committee"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if committee not in COMMITTEE_BY_ID:
+            continue
+        era = str(entry.get("era") or "")
+        starts, ends = windows.get(era, (None, None))
+        roster[str(card)] = CardAssignment(
+            committee_id=committee,
+            holder=str(entry.get("holder") or ""),
+            verified=bool(entry.get("verified", False)),
+            era=era,
+            starts=starts,
+            ends=ends,
+        )
+    return roster
 
 
 class CardRegistry:
     """
-    Card -> committee, with provenance.
+    Card -> committee, with provenance and cohort.
 
     Unverified entries are accepted so history-derived affinities can be tried,
-    but they carry a quarter of the weight and are labelled in the evidence, so
+    but they carry a fraction of the weight and are labelled in the evidence, so
     a reviewer can always see whether a suggestion rests on documentation or on
     a guess.
     """
 
     def __init__(self, assignments: dict[str, CardAssignment] | None = None) -> None:
-        self._cards = dict(assignments if assignments is not None else CONFIRMED_CARDS)
+        self._cards = dict(assignments if assignments is not None else load_card_roster())
 
-    def get(self, card: str | None) -> CardAssignment | None:
-        return self._cards.get(card) if card else None
+    def get(self, card: str | None, when: date | None = None) -> CardAssignment | None:
+        """The assignment for `card`, provided its cohort covers `when`."""
+        assignment = self._cards.get(card) if card else None
+        if assignment is None or not assignment.covers(when):
+            return None
+        return assignment
+
+    def items(self) -> list[tuple[str, CardAssignment]]:
+        return sorted(self._cards.items())
+
+    def certain(self, record: dict) -> Classification | None:
+        """
+        The committee a confirmed, in-cohort card decides outright -- or None.
+
+        This is the top of the pipeline, ahead of every other rule. It never
+        fires for an unverified card (that is a hint, weighed in scoring) or for
+        a card outside its cohort's dates (that card belongs to someone else now).
+        """
+        card = card_number(record.get("details"))
+        assignment = self.get(card, record_date(record))
+        if assignment is None or not assignment.verified:
+            return None
+        holder = f" ({assignment.holder})" if assignment.holder else ""
+        era = f" {assignment.era}" if assignment.era else ""
+        return Classification(
+            committee_id=assignment.committee_id,
+            purpose=COMMITTEE_PURPOSE.get(assignment.committee_id, "Misc."),
+            rule=f"Card {card}{holder} — on the{era} card roster",
+            confidence=1.0,
+            source="rule",
+        )
 
     def with_unverified(self, card: str, committee_id: int, holder: str = "") -> "CardRegistry":
         """A copy with one extra inferred assignment. Never overwrites a confirmed one."""
@@ -296,12 +450,7 @@ class ScoredResult:
         )
 
 
-def collect_signals(
-    record: dict,
-    *,
-    cards: CardRegistry | None = None,
-    remembered_committee: int | None = None,
-) -> list[Signal]:
+def collect_signals(record: dict, *, cards: CardRegistry | None = None) -> list[Signal]:
     """
     Every piece of evidence this transaction offers.
 
@@ -312,29 +461,32 @@ def collect_signals(
     details = record.get("details")
     signals: list[Signal] = []
 
-    if remembered_committee is not None:
-        signals.append(
-            Signal(remembered_committee, W_MERCHANT_MEMORY, "A human mapped this merchant")
-        )
-
-    assignment = registry.get(card_number(details))
+    card = card_number(details)
+    assignment = registry.get(card, record_date(record))
     if assignment is not None:
-        label = "confirmed by treasury doc" if assignment.verified else "inferred, unconfirmed"
+        label = "on the card roster" if assignment.verified else "inferred, unconfirmed"
         holder = f" ({assignment.holder})" if assignment.holder else ""
         signals.append(
-            Signal(
-                assignment.committee_id,
-                assignment.weight,
-                f"Card {card_number(details)}{holder} — {label}",
-            )
+            Signal(assignment.committee_id, assignment.weight, f"Card {card}{holder} — {label}")
         )
 
     is_bar = looks_like_bar(details)
     is_food = looks_like_food_merchant(details)
 
-    if is_bar:
-        signals.append(Signal(5, W_BAR_MERCHANT, "Bar or liquor merchant"))
-
+    # NOTE: a bar no longer votes for Membership.
+    #
+    # `Signal(5, W_BAR_MERCHANT, ...)` used to sit here at weight 2.5, asserting
+    # that bar and liquor spend belongs to Membership. Measured against real
+    # human decisions that signal had **38% precision**, and fitting the weights
+    # against the label set gave it **0.00** -- it earned nothing. The largest
+    # single confusion it caused was Membership vs Consulting, because bar and
+    # restaurant spend on consulting projects is ordinary.
+    #
+    # The detection itself is still worth having, because knowing a merchant is
+    # a bar is real information -- it is just not information about *which*
+    # committee. So it keeps its one defensible job below: suppressing the
+    # meeting-food reading. Which committee a bar charge belongs to is decided by
+    # the card or the memo -- and failing both, by a human.
     if is_food and not is_bar:
         signals.append(Signal(8, W_FOOD_MERCHANT, "Food merchant"))
 
@@ -366,16 +518,9 @@ def collect_signals(
     return signals
 
 
-def score(
-    record: dict,
-    *,
-    cards: CardRegistry | None = None,
-    remembered_committee: int | None = None,
-) -> ScoredResult:
+def score(record: dict, *, cards: CardRegistry | None = None) -> ScoredResult:
     """Collect evidence and tally it per committee."""
-    signals = collect_signals(
-        record, cards=cards, remembered_committee=remembered_committee
-    )
+    signals = collect_signals(record, cards=cards)
     totals: dict[int, float] = {}
     for signal in signals:
         if signal.committee_id not in COMMITTEE_BY_ID:

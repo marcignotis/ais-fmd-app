@@ -8,14 +8,15 @@ a new page is consistent by default rather than by discipline.
 FINDING (performance). `animated_typing_title` slept 20ms per character and
 every page called it at the top. Streamlit re-runs the whole script on every
 widget interaction, so each filter change cost about half a second of
-deliberate delay plus one markdown re-render per character. The animation is
-kept, because it is part of the app's character -- but it runs once per session
-per title, not once per interaction.
+deliberate delay plus one markdown re-render per character. It was first cut
+down to once per session per title, and is now gone entirely: a title that
+types itself is the single loudest tell that a piece of software was generated
+rather than designed, and it bought nothing that the CSS entrance animation in
+`theme` does not do in 400ms without blocking the script.
 """
 
 from __future__ import annotations
 
-import time
 from typing import Iterable
 
 import re
@@ -28,19 +29,19 @@ from .. import settings
 from ..domain.money import format_currency, format_delta
 from . import theme
 
-_TITLE_SEEN_KEY = "_ais_titles_animated"
-
 
 def bootstrap(page_title: str = "UF AIS Financial Management") -> None:
     """Call once at the top of the entry point."""
     st.set_page_config(
         page_title=page_title,
-        page_icon="📒",
+        # A Material glyph rather than an emoji. The notebook emoji rendered as
+        # whatever each OS happened to draw -- a different picture on Windows,
+        # macOS and Android -- and reads as a placeholder either way.
+        page_icon=":material/account_balance:",
         layout="wide",
         initial_sidebar_state="expanded",
     )
-    theme.register()
-    st.markdown(theme.APP_CSS, unsafe_allow_html=True)
+    st.markdown(theme.app_css(theme.active()), unsafe_allow_html=True)
 
 
 def environment_banner() -> None:
@@ -54,31 +55,8 @@ def environment_banner() -> None:
     )
 
 
-def animated_title(text: str, *, delay: float = 0.012) -> None:
-    """
-    Typing animation, but only the first time a given title is shown this session.
-
-    Subsequent re-runs render it instantly, so filters stay responsive.
-    """
-    seen: set[str] = st.session_state.setdefault(_TITLE_SEEN_KEY, set())
-    if text in seen:
-        st.markdown(f'<div class="ais-head"><h1>{text}</h1></div>', unsafe_allow_html=True)
-        return
-
-    seen.add(text)
-    placeholder = st.empty()
-    for index in range(1, len(text) + 1):
-        placeholder.markdown(
-            f'<div class="ais-head"><h1>{text[:index]}</h1></div>', unsafe_allow_html=True
-        )
-        time.sleep(delay)
-
-
-def page_header(title: str, subtitle: str = "", *, animate: bool = True) -> None:
-    if animate:
-        animated_title(title)
-    else:
-        st.markdown(f'<div class="ais-head"><h1>{title}</h1></div>', unsafe_allow_html=True)
+def page_header(title: str, subtitle: str = "") -> None:
+    st.markdown(f'<div class="ais-head"><h1>{title}</h1></div>', unsafe_allow_html=True)
     if subtitle:
         st.markdown(f'<div class="ais-head"><p>{subtitle}</p></div>', unsafe_allow_html=True)
     st.markdown('<hr class="ais-rule" />', unsafe_allow_html=True)
@@ -147,6 +125,7 @@ def metric(
     inverse: bool = False,
     currency: bool = True,
     trend: list[float] | None = None,
+    color: str | None = None,
 ) -> None:
     """
     One KPI.
@@ -182,9 +161,18 @@ def metric(
     if trend:
         from . import charts
 
+        # FINDING (visual). The sparkline took the brand accent for an ordinary
+        # metric and the over-budget red for any `inverse` one, so the income
+        # trend was drawn in UF orange -- the app's expense colour -- and the
+        # expense trend in the colour that means "over budget" everywhere else.
+        # Two of the four tiles were saying something false. A caller that
+        # knows what the figure means passes `color`; the old behaviour stays
+        # as the fallback for callers that do not.
+        spark_color = color or (theme.active().over if inverse else theme.active().accent)
         container.plotly_chart(
-            charts.sparkline(trend, color=theme.OVER if inverse else theme.ACCENT),
+            _transparent(charts.sparkline(trend, color=spark_color)),
             width="stretch",
+            theme=None,
             config={"displayModeBar": False},
             key=f"spark_{label}",
         )
@@ -205,6 +193,7 @@ def metric_row(specs: Iterable[dict]) -> None:
             inverse=spec.get("inverse", False),
             currency=spec.get("currency", True),
             trend=spec.get("trend"),
+            color=spec.get("color"),
         )
 
 
@@ -291,11 +280,51 @@ def linked_slider(
     return st.session_state[state_key]
 
 
+def _transparent(figure: go.Figure) -> go.Figure:
+    """
+    Force the figure's own grounds to transparent.
+
+    FINDING (visual). The page draws a blueprint ruling across the whole main
+    area and every chart is meant to sit *on* it. The registered template asks
+    for transparent grounds and serialises correctly -- but Streamlit writes
+    `paper_bgcolor` and `plot_bgcolor` from `.streamlit/config.toml` onto the
+    figure anyway, and it does so even when `theme=None` says to leave the
+    figure alone. Measured on every chart on the dashboard: `plot_bgcolor`
+    arrived as #0A0C0F, so each chart punched an opaque rectangle through the
+    ruling and the drawing surface was interrupted seven times on one page.
+
+    Setting the values on the figure's own layout, rather than only on the
+    template, is what survives that merge.
+
+    The template is attached here too, per figure, rather than installed as
+    `pio.templates.default`. That default is process-global, and with a light
+    and a dark palette in play a global default is a race: whichever session
+    rendered last would decide what every other session's charts looked like.
+    """
+    return figure.update_layout(
+        template=theme.build_template(),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+    )
+
+
 def chart(figure: go.Figure, *, key: str | None = None) -> None:
-    """Render a Plotly figure with consistent options."""
+    """
+    Render a Plotly figure with consistent options.
+
+    FINDING (visual). `st.plotly_chart` defaults to `theme="streamlit"`, which
+    layers Streamlit's own Plotly styling *over* whatever template the figure
+    carries. The app registers a template in `theme.build_template` and sets it
+    as the Plotly default, but Streamlit was overriding parts of it at render
+    time -- axis tick labels came out at #E6EAF1 instead of the muted token, so
+    every axis in the app was brighter than its data. Passing `theme=None`
+    hands the figure back to its own template, which is the whole point of
+    registering one.
+    """
     st.plotly_chart(
-        figure,
+        _transparent(figure),
         width="stretch",
+        theme=None,
         config={"displaylogo": False, "modeBarButtonsToRemove": ["lasso2d", "select2d"]},
         key=key,
     )
@@ -307,9 +336,98 @@ def dataframe(df: pd.DataFrame, **kwargs) -> None:
     st.dataframe(df, width="stretch", **kwargs)
 
 
+# Streamlit persists the viewer's theme choice in browser localStorage under
+# this key. It is an internal detail of the frontend bundle, not a public API,
+# so `tests/test_theme_switch.py` re-derives both the key template and the
+# version number from the installed Streamlit build and fails if either moves.
+# That turns a silent no-op button into a red test on upgrade.
+_THEME_KEY_TEMPLATE = "stActiveTheme-{pathname}-v{version}"
+_THEME_STORAGE_VERSION = 2
+
+
+def mode_switch() -> None:
+    """
+    A button that swaps light and dark.
+
+    There is no Python API for this. `st.context.theme` is read-only, and its
+    own docstring warns that the value is unreliable during a change -- so the
+    only way to move the whole app, Streamlit's own chrome included, is to
+    write the preference the frontend reads and reload.
+
+    That last part matters more than it looks. `st.dataframe` renders through a
+    canvas grid that takes its colours from Streamlit's theme, not from the app
+    stylesheet, so a CSS-only light mode would leave every table on the
+    Dashboard sitting dark on a white page. Driving Streamlit's real theme is
+    what keeps the tables, the widgets and the drawing in agreement.
+
+    The cost is a page reload, which is why the label is a plain switch and not
+    a live toggle. If a future Streamlit changes the storage key, the button
+    stops working rather than breaking anything -- and the guard test fails
+    first, at upgrade time. The Settings menu remains the fallback either way.
+    """
+    palette = theme.active()
+    going_light = palette.name == "dark"
+    label = "Light mode" if going_light else "Dark mode"
+
+    with st.sidebar:
+        if st.button(label, width="stretch", key="_ais_mode_switch"):
+            _write_theme_preference("Light" if going_light else "Dark")
+
+
+def _write_theme_preference(name: str) -> None:
+    """
+    Set the frontend's stored theme and reload.
+
+    Runs inside a zero-height component iframe, which is the only place an app
+    can execute script -- `st.markdown` strips it. The iframe is same-origin
+    with the app, so `window.parent` is reachable. Everything is wrapped in a
+    try/catch: if the key ever stops being the one Streamlit reads, the button
+    quietly does nothing instead of throwing into the console on every run.
+
+    A reload starts a fresh session, so the button's state does not survive to
+    fire this a second time -- there is no loop to guard against.
+    """
+    import streamlit.components.v1 as components
+
+    components.html(
+        f"""
+        <script>
+          try {{
+            var w = window.parent;
+            var key = "stActiveTheme-" + w.location.pathname
+                    + "-v{_THEME_STORAGE_VERSION}";
+            w.localStorage.setItem(key, JSON.stringify({name!r}));
+            w.location.reload();
+          }} catch (e) {{}}
+        </script>
+        """.replace("'", '"'),
+        height=0,
+    )
+
+
 def sidebar_footer() -> None:
     st.sidebar.markdown("---")
+
+    # Sign out, in production only. `auth.sign_out()` was written correct and
+    # called by nothing, which meant the app had no way to end a session at all:
+    # once an identity was in st.session_state it stayed until the browser
+    # session did. On a shared treasury laptop the next person to open the tab
+    # was signed in as ADMIN.
+    #
+    # Absent in the sandbox on purpose -- there the identity is fabricated and
+    # the sidebar role switcher is how you change it.
+    if not settings.is_sandbox():
+        from .. import auth
+
+        identity = st.session_state.get(auth.SESSION_KEY)
+        if identity is not None:
+            st.sidebar.caption(f"Signed in as **{identity.email}**")
+            if st.sidebar.button("Sign out", width="stretch", key="_ais_sign_out"):
+                auth.sign_out()
+                st.rerun()
+
     mode = "Sandbox" if settings.is_sandbox() else "Production"
     st.sidebar.caption(f"Mode: **{mode}**")
     if settings.is_sandbox():
         st.sidebar.caption("Local SQLite. No network, no real money.")
+    st.sidebar.caption(f"Drawing: **{theme.active().name.title()}**")

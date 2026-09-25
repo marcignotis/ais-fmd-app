@@ -5,10 +5,11 @@ Replaces "categorize everything, then eyeball a 200-row grid". Uncategorized
 transactions are worked one at a time, highest-value first, with the reason the
 categorizer could not resolve them shown alongside.
 
-The part that compounds: every correction is offered to merchant memory (M4).
-Resolve "SWEETWATER BRANCH INN" once and every future transaction from that
-merchant is categorized instantly, for free, forever. The queue shrinks as it
-is worked rather than regenerating at the same size each semester.
+Every decision is logged as a label (M19), with what the categorizer proposed
+beside what the treasurer chose, so spot-checks and evaluation can measure how
+often the categorizer is right. Decisions no longer become merchant rules:
+treasury ruled merchant memory out of categorization on 2026-09-23 (see
+`pipeline.py`), so the way to shrink this queue is an accurate card roster.
 """
 
 from __future__ import annotations
@@ -27,9 +28,8 @@ from ais_fmd.config.categories import (
 from ais_fmd.data import repositories as repo
 from ais_fmd.data.backend import TransactionChange
 from ais_fmd.domain import dues
-from ais_fmd.domain.categorize.merchants import merchant_key
 from ais_fmd.domain.categorize.pipeline import categorize_records
-from ais_fmd.domain.categorize.scoring import CURRENT_ERA
+from ais_fmd.domain.categorize.scoring import CardRegistry, current_era
 from ais_fmd.ui import charts, shell
 
 identity = auth.require(auth.Role.TREASURER)
@@ -37,12 +37,11 @@ identity = auth.require(auth.Role.TREASURER)
 shell.environment_banner()
 shell.page_header(
     "Review Queue",
-    "Work through what the categorizer could not resolve. Every correction "
-    "teaches the merchant table, so the queue shrinks over time.",
+    "Work through what the categorizer could not resolve. Purchases on a card "
+    "in the card roster never reach this queue.",
 )
 
 transactions = repo.load_transactions()
-memory = repo.load_merchant_memory()
 
 if transactions.empty:
     shell.empty_state("No transactions yet", "Upload a statement from the Treasury page.")
@@ -117,21 +116,21 @@ overview[2].metric(
     f"{(total_resolved / len(transactions) * 100) if len(transactions) else 0:.1f}%",
     help="Across every imported statement, not just the selected period.",
 )
-overview[3].metric("Merchant rules learned", f"{len(memory):,}")
-
-if pending.empty:
-    st.success("The queue is empty — every transaction has a committee and a purpose.")
-    st.stop()
+overview[3].metric(
+    "Cards on the roster",
+    f"{sum(1 for _card, a in CardRegistry().items() if a.verified and a.era == current_era()):,}",
+    help="Confirmed cards for the current officer cohort, from config/card_roster.json.",
+)
 
 st.markdown('<hr class="ais-rule" />', unsafe_allow_html=True)
 
 # --- Suggestions -------------------------------------------------------------
 # Re-run the pipeline over the pending rows so the queue shows what the current
-# rules and merchant memory would do now, which may differ from when they were
+# card roster and rules would do now, which may differ from when they were
 # first imported.
 
 records = pending.to_dict("records")
-run = categorize_records(records, memory, dues=dues.schedule_from_terms(repo.load_terms()))
+run = categorize_records(records, dues=dues.schedule_from_terms(repo.load_terms()))
 
 # A row the confidence gate held back has no classification, but it does have a
 # scored proposal — the committee the evidence favoured, how sure it was, and
@@ -175,12 +174,12 @@ pending["confidence"] = confidences
 pending["contested"] = contested
 pending["magnitude"] = pending["amount"].abs()
 
-resolvable = int((pending["match_source"].isin({"rule", "merchant", "scored", "llm"})).sum())
+resolvable = int((pending["match_source"].isin({"rule", "scored", "llm"})).sum())
 proposed = int((pending["match_source"] == "proposed").sum())
 
 if resolvable:
     st.info(
-        f"Current rules and merchant memory can now resolve **{resolvable}** of these "
+        f"The current card roster and rules can now resolve **{resolvable}** of these "
         f"**{len(pending)}** without any model call."
     )
 if proposed:
@@ -229,7 +228,7 @@ filter_choice = st.radio(
 if filter_choice == FILTER_PROPOSED:
     pending = pending[pending["match_source"] == "proposed"]
 elif filter_choice == FILTER_RESOLVABLE:
-    pending = pending[pending["match_source"].isin({"rule", "merchant", "scored", "llm"})]
+    pending = pending[pending["match_source"].isin({"rule", "scored", "llm"})]
 elif filter_choice == FILTER_NO_SIGNAL:
     pending = pending[pending["match_source"] == "none"]
 
@@ -303,7 +302,7 @@ with st.form("review_queue_form"):
                     f"(confidence {row['confidence']:.0%}, via {row['match_source']})"
                 )
             else:
-                st.caption("No rule or known merchant matched this one.")
+                st.caption("No card on the roster or rule matched this one.")
 
         with choice_column:
             committee_choice = st.selectbox(
@@ -330,19 +329,6 @@ with st.form("review_queue_form"):
                 key=f"queue_purpose_{transaction_id}",
                 label_visibility="collapsed",
             )
-            remember = st.checkbox(
-                "Remember this merchant",
-                value=bool(merchant_key(row["details"])),
-                disabled=not merchant_key(row["details"]),
-                key=f"queue_remember_{transaction_id}",
-                help=(
-                    "Adds a merchant rule so future transactions from this merchant "
-                    "are categorized instantly."
-                    if merchant_key(row["details"])
-                    else "This description has no stable merchant to remember "
-                    "(Venmo transfers are person-specific)."
-                ),
-            )
 
         decisions.append(
             {
@@ -361,7 +347,6 @@ with st.form("review_queue_form"):
                 "model_source": str(row["match_source"]),
                 "committee_key": f"queue_committee_{transaction_id}",
                 "purpose_key": f"queue_purpose_{transaction_id}",
-                "remember_key": f"queue_remember_{transaction_id}",
             }
         )
         st.markdown('<hr class="ais-rule" />', unsafe_allow_html=True)
@@ -370,8 +355,8 @@ with st.form("review_queue_form"):
 
 if submitted:
     changes: list[TransactionChange] = []
-    merchant_rules: list[dict] = []
     labels: list[dict] = []
+    era = current_era()
 
     for decision in decisions:
         committee_id = parse_committee_label(st.session_state.get(decision["committee_key"]))
@@ -395,7 +380,7 @@ if submitted:
                 {
                     "source": "review",
                     "source_ref": "review-queue",
-                    "era": CURRENT_ERA,
+                    "era": era,
                     "transaction_id": decision["transaction_id"],
                     "transaction_date": str(decision["transaction_date"]),
                     "amount": float(decision["amount"]),
@@ -414,20 +399,6 @@ if submitted:
                     "natural_key": f"review:{decision['transaction_id']}",
                 }
             )
-
-        if st.session_state.get(decision["remember_key"]) and committee_id is not None:
-            key = merchant_key(decision["details"])
-            if key:
-                merchant_rules.append(
-                    {
-                        "merchant_key": key,
-                        "canonical_name": key.title(),
-                        "committee_id": committee_id,
-                        "purpose": purpose or "",
-                        "hit_count": 1,
-                        "source": "learned",
-                    }
-                )
 
     if not changes:
         st.info("Nothing selected — the queue is unchanged.")
@@ -456,15 +427,6 @@ if submitted:
                     )
                     message += f" Logged {label_result.updated} for training"
                     message += f" ({overrides} overrode the suggestion)." if overrides else "."
-            if merchant_rules:
-                merchant_result = repo.upsert_merchants(merchant_rules, identity.email)
-                if merchant_result.error:
-                    st.warning(f"Transactions saved, but merchant rules failed: {merchant_result.error}")
-                else:
-                    message += (
-                        f" Learned {len(merchant_rules)} merchant rule(s) — "
-                        f"these will categorize automatically next time."
-                    )
             st.success(message)
             st.rerun()
 
@@ -478,6 +440,6 @@ with st.expander("Suggestion confidence across the queue"):
         key="queue_confidence",
     )
     st.caption(
-        "Rules score 0.85–1.0, merchant memory 0.95, model suggestions carry the "
-        "model's own confidence. Zero means nothing matched."
+        "Cards on the roster and exact rules score 1.0, heuristic rules 0.85–0.9, "
+        "model suggestions carry the model's own confidence. Zero means nothing matched."
     )

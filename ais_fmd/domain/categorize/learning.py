@@ -114,7 +114,7 @@ def _signal_name(reason: str) -> str:
     Collapse a signal's human-readable reason to a stable family name.
 
     `collect_signals` embeds specifics in its reasons ("Purchased on a Tuesday",
-    "Card 5718 (Grant) — confirmed"). Fitting needs the family, not the
+    "Card 5718 (Membership VP) — confirmed"). Fitting needs the family, not the
     instance, or every card would be its own single-observation signal.
     """
     lowered = reason.lower()
@@ -126,8 +126,16 @@ def _signal_name(reason: str) -> str:
         return "food-on-meeting-weekday"
     if lowered.startswith("purchased on a"):
         return "meeting-weekday"
-    if lowered.startswith("bar or liquor"):
-        return "bar-merchant"
+    if lowered.startswith("past decisions"):
+        # Collapses to one name across every merchant, for the same reason
+        # "card" does: otherwise each merchant is its own single-observation
+        # signal and nothing ever accumulates enough evidence to be trusted.
+        return "merchant-history"
+    # NOTE: "bar or liquor" used to map to "bar-merchant" here. That signal is
+    # gone -- fitting it against real labels gave it a weight of 0.00 on 38%
+    # precision, which is what removing it was based on. The branch is dropped
+    # rather than kept as dead code, so this function is a true list of the
+    # signals scoring can actually emit.
     if lowered.startswith("food merchant"):
         return "food-merchant"
     if lowered.startswith("catering-sized"):

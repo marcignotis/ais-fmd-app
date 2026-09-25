@@ -1,27 +1,20 @@
 """
-Bulk merchant mapping (M4b / P3) and the rule-ordering guarantee it exposed.
+Bulk merchant grouping (M4b / P3).
 
-The ordering tests matter most. Bulk mapping introduces a hazard the row-by-row
-review queue does not have: one confirmation writes a rule that applies to every
-row sharing that merchant, including rows a deterministic rule already handles
-correctly. Real data made it concrete -- two Publix purchases were on the
-consulting card.
+What is left of bulk mapping after treasury ruled merchant memory out of
+categorization (2026-09-23): the grouping and proposal logic in
+`categorize/bulk.py`, which is still pure and still tested here. The
+`propose_merchants.py` script that turned proposals into merchant rules, and
+the rule-ordering tests that guarded it, were removed with the merchant tier.
 """
 
 from __future__ import annotations
 
-import csv
-import importlib.util
 from decimal import Decimal
-from pathlib import Path
 
 import pytest
 
 from ais_fmd.domain.categorize import bulk
-from ais_fmd.domain.categorize.merchants import MerchantMemory, MerchantRule
-from ais_fmd.domain.categorize.pipeline import categorize_records
-
-ROOT = Path(__file__).resolve().parent.parent
 
 
 def record(details: str, amount: float, date: str = "2025-09-17") -> dict:
@@ -71,8 +64,8 @@ def test_member_transfers_never_become_merchant_groups():
 @pytest.mark.parametrize(
     "details,expected",
     [
-        ("ZELLE FROM GILES GREENE ON 09/20 REF # BACQZL9WFMD1 GILES GREENE HEADSHOT", "headshot"),
-        ("ZELLE FROM SEB ON 11/01 REF # BACBGEVAAPVX HOODIE  TSHIRT  SEBASTIA", "merch"),
+        ("ZELLE FROM PARKER LANE ON 09/20 REF # BACQZL9WFMD1 PARKER LANE HEADSHOT", "headshot"),
+        ("ZELLE FROM LEO ON 11/01 REF # BACBGEVAAPVX HOODIE  TSHIRT  LEONAR", "merch"),
         ("ZELLE FROM ANON ON 09/20 REF # BACFAPGQWS2V", ""),
     ],
 )
@@ -181,153 +174,3 @@ def test_no_warning_when_the_mapping_agrees_with_existing_classifications():
     proposal = replace(report.proposals[0], committee_id=8)
     assert proposal.override_count == 0
     assert proposal.override_warning() == ""
-
-
-# --- Rule ordering (the fix bulk mapping forced) ------------------------------
-
-def test_exact_rules_outrank_merchant_memory():
-    """
-    REGRESSION. Merchant memory used to run ahead of every rule, so a learned
-    mapping could override `rule_consulting` -- which the spec says wins
-    outright: "card 8408 ... categorize immediately. Ignore all remaining rules."
-    """
-    memory = MerchantMemory(
-        [MerchantRule(key="publix", canonical_name="Publix", committee_id=8, purpose="Meeting Food")]
-    )
-    rows = [record("PURCHASE AUTHORIZED ON 09/16 PUBLIX CARD 8408 GAINESVILLE FL", -20.0)]
-    run = categorize_records(rows, memory)
-    assert run.classifications[0].committee_id == 7, "merchant memory overrode the card rule"
-    assert run.classifications[0].source == "rule"
-
-
-def test_merchant_memory_still_outranks_heuristic_rules():
-    """
-    The other half. A confirmed mapping for a specific merchant should beat a
-    keyword guess -- that is the entire value of learning it.
-    """
-    memory = MerchantMemory(
-        [MerchantRule(key="publix gainesville", canonical_name="Publix", committee_id=13, purpose="Merch")]
-    )
-    # A Tuesday food purchase the meeting-food heuristic would otherwise claim.
-    rows = [record("PURCHASE AUTHORIZED ON 09/16 PUBLIX GAINESVILLE FL", -20.0, "2025-09-18")]
-    run = categorize_records(rows, memory)
-    assert run.classifications[0].committee_id == 13
-    assert run.classifications[0].source == "merchant"
-
-
-def test_dues_are_unaffected_by_merchant_rules():
-    """
-    An exact rule still outranks a merchant mapping.
-
-    The outgoing leg no longer asserts a committee: since treasury ruled that a
-    reimbursement belongs to the committee it repaid, an outgoing transfer whose
-    memo names nothing is deliberately left unresolved. What still matters here
-    is that a blanket "zelle -> Merch" mapping cannot claim either row.
-    """
-    memory = MerchantMemory(
-        [MerchantRule(key="zelle", canonical_name="Zelle", committee_id=13, purpose="Merch")]
-    )
-    rows = [
-        record("ZELLE FROM JANE DOE ON 07/08 REF # A1", 35.00),
-        record("ZELLE TO JOHN SMITH ON 07/09 REF # A2", -50.00),
-    ]
-    run = categorize_records(rows, memory)
-    assert run.classifications[0].committee_id == 1  # dues, by exact amount
-    assert run.classifications[1].committee_id != 13, "merchant memory must not claim it"
-    assert run.classifications[1].source != "merchant"
-
-
-# --- The apply path ----------------------------------------------------------
-
-@pytest.fixture(scope="module")
-def script():
-    spec = importlib.util.spec_from_file_location(
-        "propose_merchants", ROOT / "scripts" / "propose_merchants.py"
-    )
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def _write_csv(path: Path, rows: list[dict]) -> None:
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=script_fieldnames())
-        writer.writeheader()
-        writer.writerows(rows)
-
-
-def script_fieldnames() -> list[str]:
-    return [
-        "confirm", "committee_id", "committee", "confidence", "rows",
-        "total_amount", "would_rebook", "kind", "key", "display_name",
-        "basis", "warning",
-    ]
-
-
-def _row(**overrides) -> dict:
-    base = {
-        "confirm": "", "committee_id": "8", "committee": "Meeting Food",
-        "confidence": "0.85", "rows": "3", "total_amount": "-10.00",
-        "would_rebook": "", "kind": "merchant", "key": "publix gainesville",
-        "display_name": "publix gainesville", "basis": "", "warning": "",
-    }
-    base.update(overrides)
-    return base
-
-
-def test_apply_ignores_rows_that_were_not_confirmed(script, tmp_path):
-    """Nothing is written by default. Confirmation is opt-in, never opt-out."""
-    path = tmp_path / "p.csv"
-    _write_csv(path, [_row(), _row(key="chipotle")])
-    accepted, complaints = script._confirmed_rows(path)
-    assert accepted == []
-    assert complaints == []
-
-
-def test_apply_refuses_an_unknown_committee_id(script, tmp_path):
-    path = tmp_path / "p.csv"
-    _write_csv(path, [_row(confirm="y", committee_id="999")])
-    accepted, complaints = script._confirmed_rows(path)
-    assert accepted == []
-    assert any("not a known committee" in c for c in complaints)
-
-
-def test_apply_refuses_a_confirmed_row_with_no_committee(script, tmp_path):
-    path = tmp_path / "p.csv"
-    _write_csv(path, [_row(confirm="y", committee_id="")])
-    accepted, complaints = script._confirmed_rows(path)
-    assert accepted == []
-    assert any("blank" in c for c in complaints)
-
-
-def test_apply_refuses_memo_themes_as_merchant_rules(script, tmp_path):
-    """A memo theme needs a rule in predicates.py, not a row in merchants."""
-    path = tmp_path / "p.csv"
-    _write_csv(path, [_row(confirm="y", kind="transfer-memo", key="merch", committee_id="13")])
-    accepted, complaints = script._confirmed_rows(path)
-    assert accepted == []
-    assert any("cannot be stored as a merchant rule" in c for c in complaints)
-
-
-def test_apply_accepts_a_properly_confirmed_row(script, tmp_path):
-    path = tmp_path / "p.csv"
-    _write_csv(path, [_row(confirm="y", committee_id="8")])
-    accepted, complaints = script._confirmed_rows(path)
-    assert complaints == []
-    assert accepted == [
-        {
-            "merchant_key": "publix gainesville",
-            "canonical_name": "publix gainesville",
-            "committee_id": 8,
-            "purpose": "Meeting Food",
-            "source": "bulk-confirmed",
-        }
-    ]
-
-
-@pytest.mark.parametrize("marker", ["y", "Y", "yes", "1", "true"])
-def test_apply_accepts_the_usual_ways_of_writing_yes(script, tmp_path, marker):
-    path = tmp_path / "p.csv"
-    _write_csv(path, [_row(confirm=marker)])
-    accepted, _ = script._confirmed_rows(path)
-    assert len(accepted) == 1

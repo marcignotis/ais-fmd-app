@@ -14,18 +14,18 @@ Three properties of the real Fall 2026 statement make the naive `payer == member
 comparison wrong often enough to be useless:
 
 1. **Wells Fargo emits names in both orders.** The same file carries
-   "ZELLE FROM CAMERYN WEITZ" and "ZELLE FROM SCHUCK JOHN" -- first-last and
+   "ZELLE FROM TESSA MORROW" and "ZELLE FROM PARK OWEN" -- first-last and
    last-first, with nothing in the row to say which. Any comparison has to try
    both, which is what `name_variants` is for.
 
-2. **People pay for each other, and say so in the memo.** "NICOLAS SANDERS ...
-   CHARLIE ANDREWS DUES" is Nicolas paying Charlie's dues; crediting Nicolas
-   twice and leaving Charlie unpaid is wrong on both counts. Parents pay for
-   students ("BETH MCNAMARA ... KATE MCNAMARA DUES"), and one person may cover
+2. **People pay for each other, and say so in the memo.** "MARCUS HOLLOWAY ...
+   RILEY BRENNAN DUES" is Marcus paying Riley's dues; crediting Marcus
+   twice and leaving Riley unpaid is wrong on both counts. Parents pay for
+   students ("BETH SULLIVAN ... KATE SULLIVAN DUES"), and one person may cover
    several members.
 
-3. **Memos are noisy.** "SIA RAJPUT MS ISOM DATA SCIENCE FALL 2026" and
-   "AIS DUES FOR ALEJANDRA ALZAMORA" carry a name inside prose.
+3. **Memos are noisy.** "MIRA SOLANKI MS ISOM DATA SCIENCE FALL 2026" and
+   "AIS DUES FOR GABRIELA MONTOYA" carry a name inside prose.
 
 The approach that survives all three is to search the memo **for roster members**
 rather than to parse names out of it generically. The roster is a closed list, so
@@ -54,7 +54,7 @@ import pandas as pd
 from .dues import extract_payer
 
 # Tokens that are never part of a person's name, stripped before matching so
-# "AIS DUES FOR ALEJANDRA ALZAMORA" and "ALEJANDRA ALZAMORA" compare equal.
+# "AIS DUES FOR GABRIELA MONTOYA" and "GABRIELA MONTOYA" compare equal.
 _NOISE_WORDS = frozenset(
     {
         "ais", "uf", "dues", "due", "payment", "payments", "pay", "paid", "fee",
@@ -80,10 +80,10 @@ def normalize_name(value: object) -> str:
     """
     A name reduced to lowercase alphabetic tokens, sorted.
 
-    Sorting is what makes "Schuck John" and "John Schuck" the same key, which is
+    Sorting is what makes "Park Owen" and "Owen Park" the same key, which is
     required because Wells Fargo emits both orders in one file with nothing to
     distinguish them. It costs the ability to tell apart two members whose names
-    are anagrams of each other at the token level -- "John Schuck" vs "Schuck
+    are anagrams of each other at the token level -- "Owen Park" vs "Park
     John" as two different people -- which is not a real case.
     """
     if value is None or (isinstance(value, float) and pd.isna(value)):
@@ -126,8 +126,8 @@ class Member:
     notes: str = ""
     # Additional normalised names the same person is known by. The Fall 2026
     # membership form carries a Preferred Name for 34 of 152 members, and the
-    # bank data uses both forms freely: the roster says "Katherine McNamara"
-    # while the memo on her payment says "KATE MCNAMARA". Matching on the legal
+    # bank data uses both forms freely: the roster says "Katherine Sullivan"
+    # while the memo on her payment says "KATE SULLIVAN". Matching on the legal
     # name alone would leave a fifth of the roster looking unpaid.
     alt_keys: tuple[str, ...] = ()
     preferred_name: str = ""
@@ -166,7 +166,7 @@ def member_from_name(name: object, **extra) -> Member | None:
 # "preferred name" is deliberately NOT here, though it is the most tempting
 # entry in the list. On the Fall 2026 membership form it matched first, and
 # because only 65 of 152 people filled it in the roster came out as 58
-# nicknames -- "Abhi", "RJ", "Nic" -- with no surnames to match on and
+# nicknames -- "Vik", "RJ", "Nic" -- with no surnames to match on and
 # two-thirds of the membership silently missing. A preferred name is an alias
 # for a person, never the identity of one.
 _NAME_COLUMNS = (
@@ -270,7 +270,7 @@ def parse_roster(df: pd.DataFrame) -> RosterImport:
             preferred = ""
 
         # The preferred name may be a bare first name ("Kate") or an entire name
-        # ("Tyler Barnett"), depending on how the person filled the form in.
+        # ("Caleb Foster"), depending on how the person filled the form in.
         # Appending the surname covers the first case and is harmless in the
         # second, because `normalize_name` de-duplicates tokens.
         alt_keys: list[str] = []
@@ -389,7 +389,7 @@ def _matched_alias_tokens(member: Member, text_tokens: set[str]) -> frozenset[st
     Used to turn a confirmed suggestion into a precise alias: not the whole memo
     (which may carry unrelated words) and not the member's own spelling (which
     is exactly what did not match), but the payer's actual spelling of just the
-    name -- "zackary florendo", not "florendo zackary dues fall 2026".
+    name -- "zachariah calloway", not "calloway zachariah dues fall 2026".
     """
     for keys in member.key_sets:
         if keys and all(_prefix_hit(token, text_tokens) for token in keys):
@@ -451,15 +451,11 @@ def _scored_hits(text: str, members: list[Member]) -> list[tuple[int, Member]]:
     return hits
 
 
-def _members_in_text(text: str, members: list[Member]) -> list[Member]:
-    return [member for _, member in _scored_hits(text, members)]
-
-
 def _best_member(hits: list[tuple[int, Member]]) -> Member | None:
     """
     The one member a list of scored hits unambiguously points at.
 
-    The longest matched name wins: "Kate McNamara" beating "Kate" is right,
+    The longest matched name wins: "Kate Sullivan" beating "Kate" is right,
     because the more specific name is the more likely referent. Equal-length
     ties are refused rather than broken arbitrarily.
     """
@@ -502,8 +498,8 @@ def match_payments(
         #
         # An earlier attempt subtracted the payer's tokens from the row instead.
         # That broke the commonest on-behalf case there is: a parent paying for
-        # a student shares the surname, so "BETH MCNAMARA ... KATE MCNAMARA"
-        # lost "mcnamara" and Kate stopped matching. Slicing by position in the
+        # a student shares the surname, so "BETH SULLIVAN ... KATE SULLIVAN"
+        # lost "sullivan" and Kate stopped matching. Slicing by position in the
         # record is exact where token subtraction is not.
         memo_hits = _scored_hits(extract_memo(details), members)
         beneficiary = _best_member(memo_hits)
@@ -591,16 +587,16 @@ class Reconciliation:
         Unmatched payments paired with the unpaid member they probably belong to.
 
         Strictly a proposal. Nothing here is credited automatically, and that is
-        the point: exact matching refuses "ZACKARY FLORENDO" against a roster
-        reading "Zack Florendo", and refusing is right, because a matcher loose
+        the point: exact matching refuses "ZACHARIAH CALLOWAY" against a roster
+        reading "Zach Calloway", and refusing is right, because a matcher loose
         enough to accept it is also loose enough to credit the wrong person's
         dues. What a human can do in one glance is confirm it.
 
         The rule is prefix-per-token: every token of the member's name must be a
         prefix of, or equal to, some token in the payment. That accepts
-        "Zack"/"Zackary" and "Rudd"/"Rudds" -- shortened forms and stray plurals,
-        which is what the real near-misses were -- while rejecting "Eugene Wang"
-        against "Yung Cheng Wang", where only the surname agrees.
+        "Zach"/"Zachariah" and "Whitfield"/"Whitfields" -- shortened forms and stray plurals,
+        which is what the real near-misses were -- while rejecting "Victor Huang"
+        against "Yi Ming Huang", where only the surname agrees.
         """
         pairs: list[tuple[PaymentMatch, Member]] = []
         unpaid = self.unpaid
@@ -610,8 +606,8 @@ class Reconciliation:
         # Searched from the member's side, over *every* payment rather than only
         # the unmatched ones. A near-miss in a memo does not leave the payment
         # unmatched -- it falls through to crediting the payer, which is how
-        # "NICOLAS SANDERS ... JAYME RUDDS DUES" ended up as a second credit for
-        # Nicolas while Jayme showed unpaid. Looking only at unmatched payments
+        # "MARCUS HOLLOWAY ... DANA WHITFIELDS DUES" ended up as a second credit for
+        # Marcus while Dana showed unpaid. Looking only at unmatched payments
         # would never find her.
         for member in unpaid:
             candidates: list[PaymentMatch] = []

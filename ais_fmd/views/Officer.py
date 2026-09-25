@@ -149,17 +149,41 @@ else:
                 by_purpose,
                 label_column="Category",
                 value_column="Amount",
-                color=theme.EXPENSE,
+                color=theme.active().expense,
             ),
             key="officer_purposes",
         )
 
 # --- Reimbursements ----------------------------------------------------------
+#
+# Reimbursements are cut from the MVP: the page is unloaded from app.py's
+# navigation and the tables live in the deferred migration 002. This section
+# used to call `repo.load_reimbursements()` unconditionally, which against a
+# database with only migration 001 applied queries a relation that does not
+# exist -- taking down the whole page rather than hiding one section of it.
+#
+# Asking the backend whether it can answer, rather than assuming it can, keeps
+# the section working in the sandbox (where the tables do exist) and silent in
+# production until 002 runs. Turning the feature back on needs no change here.
 
 st.markdown('<hr class="ais-rule" />', unsafe_allow_html=True)
+
+try:
+    requests = repo.load_reimbursements()
+    reimbursements_available = True
+except Exception:  # noqa: BLE001 - a missing table is a deployment state, not an error
+    requests = pd.DataFrame()
+    reimbursements_available = False
+
+if not reimbursements_available:
+    st.caption(
+        "Reimbursement tracking is not enabled on this deployment yet. Your "
+        "budget and spending above are unaffected."
+    )
+    st.stop()
+
 st.markdown("#### Reimbursements for this committee")
 
-requests = repo.load_reimbursements()
 if requests.empty:
     shell.empty_state(
         "No requests raised",

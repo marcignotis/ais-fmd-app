@@ -223,7 +223,7 @@ with chart_column:
             name="Baseline",
             x=headline["Line"],
             y=headline["Baseline"],
-            marker=dict(color=theme.UNBUDGETED),
+            marker=dict(color=theme.active().unbudgeted),
             hovertemplate="Baseline: $%{y:,.2f}<extra></extra>",
         )
     )
@@ -232,7 +232,7 @@ with chart_column:
             name="Scenario",
             x=headline["Line"],
             y=headline["Scenario"],
-            marker=dict(color=theme.ACCENT),
+            marker=dict(color=theme.active().accent),
             hovertemplate="Scenario: $%{y:,.2f}<extra></extra>",
         )
     )

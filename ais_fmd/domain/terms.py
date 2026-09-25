@@ -198,7 +198,17 @@ def previous_semester(df_terms: pd.DataFrame, current: str) -> str | None:
 
 
 def term_id_for_semester(df_terms: pd.DataFrame, semester: str) -> str | None:
-    match = df_terms[df_terms["Semester"] == semester]
+    """
+    The TermID whose Semester name matches, or None.
+
+    Compares as strings on both sides. `Roster.py` reimplemented this inline
+    with `.astype(str)` for a reason worth keeping: a terms table read back from
+    an empty query can carry an object or float dtype in `Semester`, and a bare
+    `==` against a str then matches nothing without raising.
+    """
+    if df_terms is None or df_terms.empty or "Semester" not in df_terms.columns:
+        return None
+    match = df_terms[df_terms["Semester"].astype(str) == str(semester)]
     return None if match.empty else str(match.iloc[0]["TermID"])
 
 

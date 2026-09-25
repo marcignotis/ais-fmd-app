@@ -7,7 +7,6 @@ import streamlit as st
 from ais_fmd import auth
 from ais_fmd.data import repositories as repo
 from ais_fmd.domain import budgets as budget_domain
-from ais_fmd.domain import quality, reconcile
 from ais_fmd.domain.terms import ordered_semesters
 from ais_fmd.ui import shell
 
@@ -51,7 +50,7 @@ col_left, col_right = st.columns(2)
 
 with col_left:
     st.markdown("#### Needs attention")
-    issues = quality.run_all_checks(bundle.transactions, bundle.budgets, bundle.terms)
+    issues = repo.run_quality_checks()
     actionable = [issue for issue in issues if issue.severity in {"critical", "high", "medium"}]
     if not actionable:
         shell.empty_state("Nothing flagged", "All data-quality checks pass.")
@@ -66,8 +65,7 @@ with col_left:
 
 with col_right:
     st.markdown("#### Reconciliation")
-    balances = repo.load_statement_balances()
-    results = reconcile.reconcile_all(bundle.transactions, balances)
+    results = repo.reconcile_all()
     if not results:
         shell.empty_state("No statement balances recorded", "Add them on the Reconciliation page.")
     else:

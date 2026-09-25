@@ -112,6 +112,12 @@ CREATE TABLE IF NOT EXISTS merchants (
     purpose        TEXT,
     hit_count      INTEGER DEFAULT 0,
     source         TEXT DEFAULT 'learned',
+    -- Which committees a human has actually chosen for this merchant, and how
+    -- often: "5:3,7:7". `committee_id` above holds the dominant reading; this
+    -- holds the whole distribution, so a merchant that genuinely spans
+    -- committees can say so instead of being overwritten by whichever decision
+    -- came last. See domain/categorize/merchants.py.
+    committee_counts TEXT,
     updated_at     TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -193,6 +199,7 @@ CREATE TABLE IF NOT EXISTS labeled_examples (
     model_committee   INTEGER,                -- what scoring proposed, when known
     model_confidence  REAL,
     model_source      TEXT,
+    sample_weight     REAL,                   -- spot-checks: rows of the population this one stands for
     labeled_by        TEXT NOT NULL,
     labeled_at        TEXT DEFAULT CURRENT_TIMESTAMP,
     natural_key       TEXT UNIQUE             -- dedupes re-imports of the same ledger row
@@ -297,6 +304,12 @@ class SqliteBackend(Backend):
                 ("alt_keys", "TEXT"),
                 ("preferred_name", "TEXT"),
                 ("claims_paid", "INTEGER NOT NULL DEFAULT 0"),
+            ],
+            "merchants": [
+                ("committee_counts", "TEXT"),
+            ],
+            "labeled_examples": [
+                ("sample_weight", "REAL"),
             ],
             "terms": [
                 ("locked", "INTEGER NOT NULL DEFAULT 0"),
@@ -537,8 +550,8 @@ class SqliteBackend(Backend):
         Teach the roster a second name for one member, permanently.
 
         This is how a "likely match" in the Roster page becomes a real one: a
-        treasurer confirms that "zackary florendo" is the same person as
-        "zack florendo", and every future statement matches directly instead of
+        treasurer confirms that "zachariah calloway" is the same person as
+        "zach calloway", and every future statement matches directly instead of
         landing in "likely matches" again. Same shape as "Remember this
         merchant" on the Review Queue -- a human's one-time confirmation turned
         into a rule the next import benefits from.
@@ -695,8 +708,8 @@ class SqliteBackend(Backend):
                             source, source_ref, era, transaction_id, transaction_date,
                             amount, details, account, committee_id, purpose,
                             model_committee, model_confidence, model_source,
-                            labeled_by, natural_key
-                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                            sample_weight, labeled_by, natural_key
+                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                         ON CONFLICT (natural_key) DO NOTHING
                         """,
                         (
@@ -713,6 +726,7 @@ class SqliteBackend(Backend):
                             example.get("model_committee"),
                             example.get("model_confidence"),
                             example.get("model_source"),
+                            example.get("sample_weight"),
                             example.get("labeled_by", actor),
                             example.get("natural_key"),
                         ),
@@ -975,14 +989,16 @@ class SqliteBackend(Backend):
                 for rule in rules:
                     connection.execute(
                         "INSERT INTO merchants "
-                        "(merchant_key, canonical_name, committee_id, purpose, hit_count, source) "
-                        "VALUES (?, ?, ?, ?, ?, ?) "
+                        "(merchant_key, canonical_name, committee_id, purpose, hit_count, "
+                        " source, committee_counts) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?) "
                         "ON CONFLICT (merchant_key) DO UPDATE SET "
-                        "  canonical_name = excluded.canonical_name, "
-                        "  committee_id  = excluded.committee_id, "
-                        "  purpose       = excluded.purpose, "
-                        "  hit_count     = merchants.hit_count + 1, "
-                        "  updated_at    = CURRENT_TIMESTAMP",
+                        "  canonical_name   = excluded.canonical_name, "
+                        "  committee_id     = excluded.committee_id, "
+                        "  purpose          = excluded.purpose, "
+                        "  hit_count        = merchants.hit_count + 1, "
+                        "  committee_counts = excluded.committee_counts, "
+                        "  updated_at       = CURRENT_TIMESTAMP",
                         (
                             rule["merchant_key"],
                             rule.get("canonical_name"),
@@ -990,6 +1006,7 @@ class SqliteBackend(Backend):
                             rule.get("purpose"),
                             rule.get("hit_count", 1),
                             rule.get("source", "learned"),
+                            rule.get("committee_counts"),
                         ),
                     )
                     result.updated += 1

@@ -1,0 +1,66 @@
+{
+  "_README": [
+    "Which committee each card belongs to. EDIT THIS FILE, not Python.",
+    "",
+    "A purchase on a verified card that is in its cohort's dates is booked to",
+    "that card's committee outright, ahead of every other rule (treasury ruling,",
+    "2026-09-23). Getting this file right matters more than anything else in",
+    "categorization.",
+    "",
+    "Add a card by copying a block below and filling it in. The key is the last",
+    "four digits as they appear in the bank description ('... CARD 0594').",
+    "",
+    "  committee : the committee ID. The reference table is on the Treasury page,",
+    "              or in ais_fmd/config/categories.py.",
+    "  holder    : whose card it is. Shown to a treasurer as part of the reason.",
+    "  verified  : true  = treasury has confirmed this in writing. Decides the row.",
+    "              false = inferred or assumed. A weak hint only, labelled",
+    "                      'unconfirmed' wherever it is used.",
+    "  era       : the officer cohort this was confirmed under -- a name from",
+    "              _eras below. The card only applies to transactions dated",
+    "              inside that cohort's start/end, so a new cohort's cards replace",
+    "              the old ones instead of both voting.",
+    "",
+    "NEW OFFICER COHORT: add its window to _eras, point _current_era at it, and",
+    "add the new cards with that era. Leave the old cohort's cards in place --",
+    "they still categorize that cohort's statements correctly.",
+    "",
+    "A card that is not listed here contributes NO signal at all. That is",
+    "deliberate -- guessing a cardholder is how spending gets booked against the",
+    "wrong committee's budget silently.",
+    "",
+    "Keys beginning with an underscore are ignored."
+  ],
+
+  "_current_era": "2026-2027",
+
+  "_eras": {
+    "2024-2026": {"start": null, "end": "2026-07-31"},
+    "2026-2027": {"start": "2026-08-01", "end": "2027-07-31"}
+  },
+
+  "_SOURCE_2026_2027": [
+    "Fall 2026 cards: E-Board Meeting 05 notes (09/21/26), VP Treasury section,",
+    "'Collect debit card last 4 digits'. Marketing and Prof Dev: no card (n/a).",
+    "3466 confirmed as the treasurer's card on 2026-09-23. Operations: not listed."
+  ],
+
+  "_UNDOCUMENTED": [
+    "Seen in real statements with no known holder. Listed so the gap is visible",
+    "rather than invisible; add them above as the numbers are confirmed.",
+    "",
+    "2024-2026 cohort, still unresolved:",
+    "  0153, 7757, 9309, 3444, 7193, 1113, 5535"
+  ],
+
+  "4831": {"committee": 7, "holder": "Consulting VPs", "verified": true, "era": "2026-2027"},
+  "0594": {"committee": 5, "holder": "Membership VP", "verified": true, "era": "2026-2027"},
+  "7101": {"committee": 5, "holder": "Membership VP", "verified": true, "era": "2026-2027"},
+  "3526": {"committee": 4, "holder": "President", "verified": true, "era": "2026-2027"},
+  "3466": {"committee": 2, "holder": "Treasurer", "verified": true, "era": "2026-2027"},
+
+  "8313": {"committee": 5, "holder": "Membership VP", "verified": true, "era": "2024-2026"},
+  "5718": {"committee": 5, "holder": "Membership VP", "verified": true, "era": "2024-2026"},
+  "3568": {"committee": 4, "holder": "President", "verified": true, "era": "2024-2026"},
+  "8408": {"committee": 7, "holder": "Consulting VP", "verified": true, "era": "2024-2026"}
+}

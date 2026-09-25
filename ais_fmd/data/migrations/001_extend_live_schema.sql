@@ -149,13 +149,13 @@ CREATE TABLE IF NOT EXISTS public.members (
     full_name      text NOT NULL,
     match_key      text NOT NULL,              -- normalised name, for payer matching
     -- Added 2026-08-26 alongside domain/roster.py. A treasurer confirming a
-    -- "likely match" (e.g. "Zackary Florendo" for roster member "Zack
-    -- Florendo") writes the payer's spelling here, so the next statement
+    -- "likely match" (e.g. "Zachariah Calloway" for roster member "Zach
+    -- Calloway") writes the payer's spelling here, so the next statement
     -- matches it directly. Comma-separated normalised keys, same encoding as
     -- the SQLite column it mirrors.
     alt_keys       text,
     -- The name on a membership form, when it differs from the legal name
-    -- (e.g. "Katherine McNamara" filing as "Kate") -- one source of aliases,
+    -- (e.g. "Katherine Sullivan" filing as "Kate") -- one source of aliases,
     -- distinct from alt_keys, which also holds treasurer-confirmed ones.
     preferred_name text,
     -- Self-certification from the membership form ("I have completed the

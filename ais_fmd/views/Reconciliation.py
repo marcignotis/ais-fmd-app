@@ -36,7 +36,7 @@ if balances.empty:
         "Add a statement period below to reconcile it against the ledger.",
     )
 else:
-    results = reconcile.reconcile_all(transactions, balances)
+    results = repo.reconcile_all()
     unbalanced = [result for result in results if not result.balanced]
 
     metrics = st.columns(4)

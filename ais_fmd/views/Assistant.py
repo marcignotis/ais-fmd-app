@@ -86,7 +86,7 @@ if question:
                         result.table,
                         label_column="Committee_Name",
                         value_column="Spent",
-                        color=theme.EXPENSE,
+                        color=theme.active().expense,
                     ),
                     key=f"assistant_chart_{len(st.session_state.assistant_history)}",
                 )
@@ -101,7 +101,7 @@ if question:
                     result.table,
                     label_column="Category",
                     value_column="Amount",
-                    color=theme.INCOME,
+                    color=theme.active().income,
                 ),
                 key=f"assistant_income_{len(st.session_state.assistant_history)}",
             )

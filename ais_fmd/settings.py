@@ -22,6 +22,66 @@ from enum import Enum
 from pathlib import Path
 
 
+# --- Where configuration comes from ------------------------------------------
+#
+# LAUNCH BUG, fixed here. Every setting below used to read `os.environ` only.
+# That is correct on a host where you can set real environment variables, and
+# silently wrong on Streamlit Community Cloud, where you cannot -- there the
+# only channel is `.streamlit/secrets.toml`.
+#
+# Streamlit *does* copy top-level secrets into `os.environ`, which is why this
+# looked like it worked. But it does that lazily, on the first access to
+# `st.secrets`, and `app.py` asked `is_sandbox()` before anything had touched
+# `st.secrets`. So `AIS_FMD_ENV` read empty, the fail-closed default returned
+# SANDBOX, and a production deployment would quietly serve generated demo data
+# with the login gate skipped entirely. No error, no warning.
+#
+# Reading both sources explicitly removes the ordering dependency and works
+# unchanged on either kind of host. A real environment variable wins, because
+# setting one is the more deliberate act; secrets are the fallback.
+#
+# `st.secrets` is imported inside the function, not at module scope, so this
+# module stays importable by the scripts in `scripts/` that run outside a
+# Streamlit process -- and so a missing or malformed secrets file is a fallback,
+# never a crash.
+
+def _setting(name: str, default: str = "") -> str:
+    """One configuration value, from the environment or from Streamlit secrets."""
+    value = os.environ.get(name)
+    if value:
+        return value
+
+    try:
+        import streamlit as st
+
+        found = st.secrets.get(name)
+    except Exception:  # noqa: BLE001 - no secrets file at all is a valid state
+        return default
+    return str(found) if found is not None else default
+
+
+def secret_section(name: str) -> dict:
+    """
+    A `[section]` from secrets.toml as a plain dict, or empty.
+
+    Sections are the other half of the same bug: Streamlit copies only top-level
+    *scalars* into `os.environ`, never the members of a section. So a
+    `[supabase]` block in secrets.toml could never satisfy code reading
+    `os.environ["SUPABASE_URL"]`, which is exactly what the project's own
+    `secrets.toml.example` told people to write.
+    """
+    try:
+        import streamlit as st
+
+        section = st.secrets.get(name, {})
+    except Exception:  # noqa: BLE001
+        return {}
+    try:
+        return dict(section)
+    except (TypeError, ValueError):
+        return {}
+
+
 class Env(str, Enum):
     SANDBOX = "sandbox"
     PRODUCTION = "production"
@@ -37,7 +97,7 @@ _PRODUCTION_TOKEN = "production"
 
 def get_env() -> Env:
     """Resolve the active environment. Anything but an exact match is sandbox."""
-    raw = os.environ.get(ENV_VAR, "")
+    raw = _setting(ENV_VAR)
     if raw.strip().lower() == _PRODUCTION_TOKEN:
         return Env.PRODUCTION
     return Env.SANDBOX
@@ -69,7 +129,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 def sandbox_db_path() -> Path:
     """Location of the local SQLite database backing sandbox mode."""
-    override = os.environ.get("AIS_FMD_SANDBOX_DB")
+    override = _setting("AIS_FMD_SANDBOX_DB")
     if override:
         return Path(override)
     return PROJECT_ROOT / "sandbox_data" / "ais_fmd_sandbox.db"
@@ -85,18 +145,18 @@ def llm_enabled() -> bool:
     uses the offline heuristic and costs nothing.
     """
     if is_sandbox():
-        return os.environ.get("AIS_FMD_ALLOW_LLM_IN_SANDBOX", "").strip() == "1"
-    return bool(os.environ.get("OPENAI_API_KEY", "").strip())
+        return _setting("AIS_FMD_ALLOW_LLM_IN_SANDBOX").strip() == "1"
+    return bool(_setting("OPENAI_API_KEY").strip())
 
 
 def llm_model() -> str:
     """Small model by default -- residual classification does not need a large one."""
-    return os.environ.get("AIS_FMD_LLM_MODEL", "gpt-4.1-mini")
+    return _setting("AIS_FMD_LLM_MODEL", "gpt-4.1-mini")
 
 
 def llm_batch_size() -> int:
     try:
-        return max(1, int(os.environ.get("AIS_FMD_LLM_BATCH_SIZE", "40")))
+        return max(1, int(_setting("AIS_FMD_LLM_BATCH_SIZE", "40")))
     except ValueError:
         return 40
 

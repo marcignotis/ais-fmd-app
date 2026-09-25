@@ -87,12 +87,23 @@ def load_credentials() -> tuple[str, str]:
                 data = tomllib.load(handle)
             section = data.get("supabase", {})
             url = str(section.get("url", "")).strip()
-            key = str(section.get("key", "") or section.get("anon_key", "")).strip()
+            # Accepts every name the app accepts, newest format first. The
+            # legacy `anon`/`service_role` JWTs were deactivated 2026-09-08
+            # after one reached a public repo, so `publishable_key` is what a
+            # current secrets file actually holds -- but the old names stay
+            # readable so this keeps working against an older project.
+            key = _first(
+                section,
+                "publishable_key", "key", "anon_key", "secret_key", "service_key",
+            )
             if url and key:
                 return url.rstrip("/"), key
 
     url = os.environ.get("SUPABASE_URL", "").strip()
-    key = os.environ.get("SUPABASE_ANON_KEY", "").strip()
+    key = (
+        os.environ.get("SUPABASE_ANON_KEY", "").strip()
+        or os.environ.get("SUPABASE_SERVICE_KEY", "").strip()
+    )
     if url and key:
         return url.rstrip("/"), key
 
@@ -101,10 +112,19 @@ def load_credentials() -> tuple[str, str]:
         "Create .streamlit/secrets.toml (it is gitignored) containing:\n\n"
         "    [supabase]\n"
         '    url = "https://<your-ref>.supabase.co"\n'
-        '    key = "<your anon key>"\n\n'
+        '    publishable_key = "sb_publishable_..."\n\n'
         "or set SUPABASE_URL and SUPABASE_ANON_KEY in the environment.\n"
         "Do not paste these into a chat or commit them."
     )
+
+
+def _first(section: dict, *names: str) -> str:
+    """The first non-empty value among `names`, or an empty string."""
+    for name in names:
+        value = str(section.get(name, "") or "").strip()
+        if value:
+            return value
+    return ""
 
 
 def _request(url: str, key: str, path: str, params: dict, extra_headers: dict | None = None):

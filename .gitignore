@@ -12,3 +12,20 @@ supabase-backup*/
 prod_export/
 *.dump
 
+# --- Secrets ------------------------------------------------------------------
+# Broadened after a service_role key reached a public repo through
+# .streamlit/secrets.toml. The old rule matched one exact path, so a file named
+# secrets.local.toml, a stray .env, or a secrets file in any other directory
+# would still have been committable. tests/test_no_secrets.py enforces this
+# independently, because a .gitignore only helps for files nobody force-adds.
+secrets.toml
+*secrets.toml
+.streamlit/secrets*.toml
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# Per-person Claude Code settings (local permissions, file paths).
+.claude/settings.local.json

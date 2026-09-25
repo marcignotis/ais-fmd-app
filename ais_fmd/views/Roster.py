@@ -10,7 +10,11 @@ from ais_fmd.data import repositories as repo
 from ais_fmd.domain import dues as dues_domain
 from ais_fmd.domain import roster as roster_domain
 from ais_fmd.domain.money import format_currency
-from ais_fmd.domain.terms import default_semester_index, ordered_semesters
+from ais_fmd.domain.terms import (
+    default_semester_index,
+    ordered_semesters,
+    term_id_for_semester,
+)
 from ais_fmd.ui import shell
 
 identity = auth.require(auth.Role.TREASURER)
@@ -38,8 +42,7 @@ selected = st.selectbox(
 )
 
 terms = bundle.terms
-matching_term = terms[terms["Semester"].astype(str) == str(selected)]
-term_id = str(matching_term.iloc[0]["TermID"]) if not matching_term.empty else ""
+term_id = term_id_for_semester(terms, selected) or ""
 
 # --- Upload ------------------------------------------------------------------
 
@@ -94,7 +97,9 @@ with st.expander("Upload a membership list", expanded=False):
                     caption=True,
                 )
                 if st.button(f"Save roster for {selected}", type="primary"):
-                    result = repo.backend().replace_members(
+                    # `save_result`, not `result`: see the note on `alias_result`
+                    # below. `result` is the page's reconciliation object.
+                    save_result = repo.backend().replace_members(
                         term_id,
                         [
                             {
@@ -111,14 +116,17 @@ with st.expander("Upload a membership list", expanded=False):
                         uploaded.name,
                         identity.email,
                     )
-                    if result.ok:
+                    if save_result.ok:
                         repo.invalidate()
                         shell.notify(
-                            "success", f"Saved {result.updated} members to {selected}."
+                            "success",
+                            f"Saved {save_result.updated} members to {selected}.",
                         )
                         st.rerun()
                     else:
-                        shell.error_state("Could not save the roster", result.error or "")
+                        shell.error_state(
+                            "Could not save the roster", save_result.error or ""
+                        )
 
 # --- Reconciliation ----------------------------------------------------------
 
@@ -258,10 +266,15 @@ with suggested_tab:
             cols[2].markdown(payment.payer_name)
             cols[3].markdown(f"*{roster_domain.extract_memo(payment.details) or '—'}*")
             if cols[4].button("Confirm", key=f"confirm_{member.match_key}_{payment.index}"):
-                result = repo.backend().add_member_alias(
+                # Deliberately NOT `result`: that name holds the page's
+                # reconciliation object, which every tab below still reads. On
+                # the failure path this function returns and the script carries
+                # on, so rebinding it turned a failed alias save into an
+                # AttributeError two tabs later.
+                alias_result = repo.backend().add_member_alias(
                     term_id, member.match_key, alias, identity.email
                 )
-                if result.ok:
+                if alias_result.ok:
                     repo.invalidate()
                     shell.notify(
                         "success",
@@ -270,7 +283,7 @@ with suggested_tab:
                     )
                     st.rerun()
                 else:
-                    shell.error_state("Could not save that alias", result.error or "")
+                    shell.error_state("Could not save that alias", alias_result.error or "")
 
 with disputed_tab:
     disputed = roster_domain.disputed_frame(result)

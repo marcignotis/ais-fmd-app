@@ -49,13 +49,13 @@ def roster(*names: str) -> list[Member]:
 @pytest.mark.parametrize(
     "a, b",
     [
-        ("SCHUCK JOHN", "John Schuck"),          # Wells Fargo emits both orders
-        ("ALZAMORA ALEJANDRA", "Alejandra Alzamora"),
+        ("PARK OWEN", "Owen Park"),          # Wells Fargo emits both orders
+        ("MONTOYA GABRIELA", "Gabriela Montoya"),
         ("Doe, Jane", "Jane Doe"),               # sheet exports often use "Last, First"
-        ("  Maria   Ilieva ", "maria ilieva"),
-        ("José Peña", "Jose Pena"),              # accents differ between systems
-        ("Robert Hosay Jr", "Robert Hosay"),     # suffix on one side only
-        ("Beth A McNamara", "Beth McNamara"),    # middle initial on one side only
+        ("  Maria   Lindqvist ", "maria lindqvist"),
+        ("Tomás Ibáñez", "Tomas Ibanez"),              # accents differ between systems
+        ("Robert Kessler Jr", "Robert Kessler"),     # suffix on one side only
+        ("Beth A Sullivan", "Beth Sullivan"),    # middle initial on one side only
     ],
 )
 def test_names_that_must_compare_equal(a, b):
@@ -63,17 +63,17 @@ def test_names_that_must_compare_equal(a, b):
 
 
 def test_different_people_do_not_collide():
-    assert normalize_name("Nicolas Sanders") != normalize_name("Nicolas Sandoval")
-    assert normalize_name("Kate McNamara") != normalize_name("Beth McNamara")
+    assert normalize_name("Marcus Holloway") != normalize_name("Marcus Hollander")
+    assert normalize_name("Kate Sullivan") != normalize_name("Beth Sullivan")
 
 
 def test_noise_words_are_stripped():
-    """"AIS DUES FOR ALEJANDRA ALZAMORA" has to reduce to the name."""
-    assert normalize_name("AIS DUES FOR ALEJANDRA ALZAMORA") == normalize_name(
-        "Alejandra Alzamora"
+    """"AIS DUES FOR GABRIELA MONTOYA" has to reduce to the name."""
+    assert normalize_name("AIS DUES FOR GABRIELA MONTOYA") == normalize_name(
+        "Gabriela Montoya"
     )
-    assert normalize_name("SIA RAJPUT MS ISOM DATA SCIENCE FALL 2026") == normalize_name(
-        "Sia Rajput"
+    assert normalize_name("MIRA SOLANKI MS ISOM DATA SCIENCE FALL 2026") == normalize_name(
+        "Mira Solanki"
     )
 
 
@@ -84,13 +84,13 @@ def test_a_name_that_is_all_noise_normalises_to_nothing():
 
 def test_match_key_and_normalize_agree():
     """The stored key and the matching rule must not drift apart."""
-    assert match_key("Schuck John") == normalize_name("John Schuck")
+    assert match_key("Park Owen") == normalize_name("Owen Park")
 
 
 # --- Memo extraction ---------------------------------------------------------
 
 def test_memo_is_sliced_after_the_reference():
-    assert extract_memo(zelle("Beth McNamara", "KATE MCNAMARA DUES")) == "KATE MCNAMARA DUES"
+    assert extract_memo(zelle("Beth Sullivan", "KATE SULLIVAN DUES")) == "KATE SULLIVAN DUES"
 
 
 def test_no_memo_returns_empty_not_the_payer():
@@ -100,7 +100,7 @@ def test_no_memo_returns_empty_not_the_payer():
     If a missing memo returned the row text, every payment would appear to name
     its own sender and "on behalf of" could never be seen.
     """
-    assert extract_memo(zelle("Cameryn Weitz")) == ""
+    assert extract_memo(zelle("Tessa Morrow")) == ""
 
 
 def test_venmo_note_is_read_from_the_pipe_format():
@@ -112,28 +112,28 @@ def test_venmo_note_is_read_from_the_pipe_format():
 # --- Matching ----------------------------------------------------------------
 
 def test_payer_is_credited_when_the_memo_names_nobody():
-    members = roster("Cameryn Weitz")
-    result = reconcile(dues_frame([(zelle("Cameryn Weitz", "AIS DUES"), 50.0)]), members)
+    members = roster("Tessa Morrow")
+    result = reconcile(dues_frame([(zelle("Tessa Morrow", "AIS DUES"), 50.0)]), members)
     assert result.summary()["paid"] == 1
     assert not result.matches[0].on_behalf_of
 
 
 def test_reversed_name_order_still_matches():
-    """Wells Fargo wrote "SCHUCK JOHN"; the roster says "John Schuck"."""
-    members = roster("John Schuck")
-    result = reconcile(dues_frame([(zelle("Schuck John", "AIS DUES"), 50.0)]), members)
+    """Wells Fargo wrote "PARK OWEN"; the roster says "Owen Park"."""
+    members = roster("Owen Park")
+    result = reconcile(dues_frame([(zelle("Park Owen", "AIS DUES"), 50.0)]), members)
     assert result.summary()["paid"] == 1
 
 
 def test_a_memo_naming_another_member_credits_that_member():
-    members = roster("Nicolas Sanders", "Charlie Andrews")
+    members = roster("Marcus Holloway", "Riley Brennan")
     result = reconcile(
-        dues_frame([(zelle("Nicolas Sanders", "CHARLIE ANDREWS DUES"), 50.0)]), members
+        dues_frame([(zelle("Marcus Holloway", "RILEY BRENNAN DUES"), 50.0)]), members
     )
     credited = result.matches[0]
-    assert credited.member.full_name == "Charlie Andrews"
+    assert credited.member.full_name == "Riley Brennan"
     assert credited.on_behalf_of
-    assert [m.full_name for m in result.unpaid] == ["Nicolas Sanders"]
+    assert [m.full_name for m in result.unpaid] == ["Marcus Holloway"]
 
 
 def test_a_shared_surname_does_not_break_the_beneficiary():
@@ -143,22 +143,22 @@ def test_a_shared_surname_does_not_break_the_beneficiary():
     An earlier implementation subtracted the payer's tokens from the row before
     searching it, which deleted the shared surname and left Kate unmatched.
     """
-    members = roster("Kate McNamara")
+    members = roster("Kate Sullivan")
     result = reconcile(
-        dues_frame([(zelle("Beth McNamara", "KATE MCNAMARA DUES"), 50.0)]), members
+        dues_frame([(zelle("Beth Sullivan", "KATE SULLIVAN DUES"), 50.0)]), members
     )
-    assert result.matches[0].member.full_name == "Kate McNamara"
+    assert result.matches[0].member.full_name == "Kate Sullivan"
     assert not result.unpaid
 
 
 def test_one_payer_can_cover_several_members():
-    members = roster("Nicolas Sanders", "Charlie Andrews", "Jayme Rudds")
+    members = roster("Marcus Holloway", "Riley Brennan", "Dana Whitfields")
     result = reconcile(
         dues_frame(
             [
-                (zelle("Nicolas Sanders", "NICOLAS SANDERS DUES", "R1"), 50.0),
-                (zelle("Nicolas Sanders", "CHARLIE ANDREWS DUES", "R2"), 50.0),
-                (zelle("Nicolas Sanders", "JAYME RUDDS DUES", "R3"), 35.0),
+                (zelle("Marcus Holloway", "MARCUS HOLLOWAY DUES", "R1"), 50.0),
+                (zelle("Marcus Holloway", "RILEY BRENNAN DUES", "R2"), 50.0),
+                (zelle("Marcus Holloway", "DANA WHITFIELDS DUES", "R3"), 35.0),
             ]
         ),
         members,
@@ -169,9 +169,9 @@ def test_one_payer_can_cover_several_members():
 
 
 def test_paying_for_yourself_is_not_on_behalf_of():
-    members = roster("Nicolas Sanders")
+    members = roster("Marcus Holloway")
     result = reconcile(
-        dues_frame([(zelle("Nicolas Sanders", "NICOLAS SANDERS DUES"), 50.0)]), members
+        dues_frame([(zelle("Marcus Holloway", "MARCUS HOLLOWAY DUES"), 50.0)]), members
     )
     assert not result.matches[0].on_behalf_of
 
@@ -183,7 +183,7 @@ def test_a_payment_naming_nobody_on_the_roster_is_unmatched():
     No fuzzy matching: crediting the wrong person's dues is worse than asking a
     human, because the error is invisible and the member gets chased anyway.
     """
-    members = roster("Cameryn Weitz")
+    members = roster("Tessa Morrow")
     result = reconcile(dues_frame([(zelle("Somebody Else", "AIS DUES"), 50.0)]), members)
     assert result.summary()["unmatched_payments"] == 1
     assert result.summary()["unmatched_amount"] == 50.0
@@ -192,8 +192,8 @@ def test_a_payment_naming_nobody_on_the_roster_is_unmatched():
 
 def test_a_single_shared_token_is_not_a_match():
     """With a roster of hundreds, one common surname would claim other people's money."""
-    members = roster("Kate McNamara", "Beth McNamara")
-    result = reconcile(dues_frame([(zelle("Somebody", "MCNAMARA"), 50.0)]), members)
+    members = roster("Kate Sullivan", "Beth Sullivan")
+    result = reconcile(dues_frame([(zelle("Somebody", "SULLIVAN"), 50.0)]), members)
     assert result.summary()["unmatched_payments"] == 1
 
 
@@ -215,9 +215,9 @@ def test_a_memo_naming_two_members_is_refused_rather_than_guessed():
 
 
 def test_the_longer_name_wins_over_a_prefix():
-    members = roster("Kate", "Kate McNamara")
-    result = reconcile(dues_frame([(zelle("Payer", "KATE MCNAMARA DUES"), 50.0)]), members)
-    assert result.matches[0].member.full_name == "Kate McNamara"
+    members = roster("Kate", "Kate Sullivan")
+    result = reconcile(dues_frame([(zelle("Payer", "KATE SULLIVAN DUES"), 50.0)]), members)
+    assert result.matches[0].member.full_name == "Kate Sullivan"
 
 
 # --- Reporting ---------------------------------------------------------------
@@ -228,34 +228,34 @@ def test_the_longer_name_wins_over_a_prefix():
 # their legal first name, and the bank data uses both forms freely.
 
 def test_a_preferred_name_in_the_memo_finds_the_member():
-    """The roster says "Katherine McNamara"; her payment memo says "KATE"."""
+    """The roster says "Katherine Sullivan"; her payment memo says "KATE"."""
     df = pd.DataFrame(
-        {"First Name": ["Katherine"], "Last Name": ["McNamara"], "Preferred Name": ["Kate"]}
+        {"First Name": ["Katherine"], "Last Name": ["Sullivan"], "Preferred Name": ["Kate"]}
     )
     members = parse_roster(df).members
     result = reconcile(
-        dues_frame([(zelle("Beth McNamara", "KATE MCNAMARA DUES"), 50.0)]), members
+        dues_frame([(zelle("Beth Sullivan", "KATE SULLIVAN DUES"), 50.0)]), members
     )
-    assert result.matches[0].member.full_name == "Katherine McNamara"
+    assert result.matches[0].member.full_name == "Katherine Sullivan"
     assert not result.unpaid
 
 
 def test_a_preferred_name_that_is_already_a_full_name_still_works():
     """Some people type their whole name into the preferred-name box."""
     df = pd.DataFrame(
-        {"First Name": ["Tyler"], "Last Name": ["Barnett"], "Preferred Name": ["Tyler Barnett"]}
+        {"First Name": ["Caleb"], "Last Name": ["Foster"], "Preferred Name": ["Caleb Foster"]}
     )
     members = parse_roster(df).members
-    result = reconcile(dues_frame([(zelle("Tyler Barnett", "DUES"), 50.0)]), members)
+    result = reconcile(dues_frame([(zelle("Caleb Foster", "DUES"), 50.0)]), members)
     assert not result.unpaid
 
 
 def test_the_legal_name_still_matches_when_a_preferred_name_exists():
     df = pd.DataFrame(
-        {"First Name": ["Nicholas"], "Last Name": ["DeLise"], "Preferred Name": ["Nico"]}
+        {"First Name": ["Anthony"], "Last Name": ["Ruggiero"], "Preferred Name": ["Tony"]}
     )
     members = parse_roster(df).members
-    result = reconcile(dues_frame([(zelle("Nicholas L DeLise", "DUES"), 50.0)]), members)
+    result = reconcile(dues_frame([(zelle("Anthony L Ruggiero", "DUES"), 50.0)]), members)
     assert not result.unpaid
 
 
@@ -270,14 +270,14 @@ def test_preferred_name_is_never_used_as_the_identity():
     """
     df = pd.DataFrame(
         {
-            "First Name": ["Abhiram", "Kenneth"],
-            "Last Name": ["Moturi", "Ordonez"],
-            "Preferred Name": ["Abhi", None],
+            "First Name": ["Vikram", "Daniel"],
+            "Last Name": ["Desai", "Okafor"],
+            "Preferred Name": ["Vik", None],
         }
     )
     parsed = parse_roster(df)
     assert len(parsed.members) == 2
-    assert {m.full_name for m in parsed.members} == {"Abhiram Moturi", "Kenneth Ordonez"}
+    assert {m.full_name for m in parsed.members} == {"Vikram Desai", "Daniel Okafor"}
 
 
 # --- Self-certification ------------------------------------------------------
@@ -302,14 +302,14 @@ def test_members_who_say_they_paid_but_did_not_are_singled_out():
 # --- Near-miss suggestions ---------------------------------------------------
 
 def test_a_shortened_first_name_is_suggested_not_credited():
-    """"ZACKARY FLORENDO" against a roster reading "Zack Florendo"."""
-    members = roster("Zack Florendo")
-    result = reconcile(dues_frame([(zelle("Zackary Florendo"), 65.0)]), members)
+    """"ZACHARIAH CALLOWAY" against a roster reading "Zach Calloway"."""
+    members = roster("Zach Calloway")
+    result = reconcile(dues_frame([(zelle("Zachariah Calloway"), 65.0)]), members)
     assert result.summary()["paid"] == 0, "must not auto-credit"
     suggestions = result.suggestions()
     assert len(suggestions) == 1
     payment, member = suggestions[0]
-    assert member.full_name == "Zack Florendo"
+    assert member.full_name == "Zach Calloway"
     assert payment.amount == 65.0
 
 
@@ -317,24 +317,24 @@ def test_a_near_miss_in_a_memo_is_found_even_though_the_payer_was_credited():
     """
     The case that only a member-side search finds.
 
-    "NICOLAS SANDERS ... JAYME RUDDS DUES" against a roster reading "Jayme
-    Rudd": the plural stops the memo matching, so the payment falls back to
-    crediting Nicolas and never appears in the unmatched list at all.
+    "MARCUS HOLLOWAY ... DANA WHITFIELDS DUES" against a roster reading "Dana
+    Whitfield": the plural stops the memo matching, so the payment falls back to
+    crediting Marcus and never appears in the unmatched list at all.
     """
-    members = roster("Nicolas Sanders", "Jayme Rudd")
+    members = roster("Marcus Holloway", "Dana Whitfield")
     result = reconcile(
         dues_frame(
             [
-                (zelle("Nicolas Sanders", "NICOLAS SANDERS DUES", "R1"), 50.0),
-                (zelle("Nicolas Sanders", "JAYME RUDDS DUES", "R2"), 35.0),
+                (zelle("Marcus Holloway", "MARCUS HOLLOWAY DUES", "R1"), 50.0),
+                (zelle("Marcus Holloway", "DANA WHITFIELDS DUES", "R2"), 35.0),
             ]
         ),
         members,
     )
-    assert [m.full_name for m in result.unpaid] == ["Jayme Rudd"]
+    assert [m.full_name for m in result.unpaid] == ["Dana Whitfield"]
     suggestions = result.suggestions()
     assert len(suggestions) == 1
-    assert suggestions[0][1].full_name == "Jayme Rudd"
+    assert suggestions[0][1].full_name == "Dana Whitfield"
     assert suggestions[0][0].amount == 35.0
 
 
@@ -342,43 +342,43 @@ def test_a_near_miss_in_a_memo_is_found_even_though_the_payer_was_credited():
 
 def test_confirming_a_shortened_name_derives_the_payers_own_spelling():
     """The alias to record is what the payer actually typed, not the roster spelling."""
-    members = roster("Zack Florendo")
-    result = reconcile(dues_frame([(zelle("Zackary Florendo"), 65.0)]), members)
+    members = roster("Zach Calloway")
+    result = reconcile(dues_frame([(zelle("Zachariah Calloway"), 65.0)]), members)
     payment, member = result.suggestions()[0]
-    assert suggested_alias(payment, member) == "florendo zackary"
+    assert suggested_alias(payment, member) == "calloway zachariah"
 
 
 def test_confirming_a_memo_near_miss_ignores_the_noise_word():
-    members = roster("Nicolas Sanders", "Jayme Rudd")
+    members = roster("Marcus Holloway", "Dana Whitfield")
     result = reconcile(
         dues_frame(
             [
-                (zelle("Nicolas Sanders", "NICOLAS SANDERS DUES", "R1"), 50.0),
-                (zelle("Nicolas Sanders", "JAYME RUDDS DUES", "R2"), 35.0),
+                (zelle("Marcus Holloway", "MARCUS HOLLOWAY DUES", "R1"), 50.0),
+                (zelle("Marcus Holloway", "DANA WHITFIELDS DUES", "R2"), 35.0),
             ]
         ),
         members,
     )
     payment, member = result.suggestions()[0]
     alias = suggested_alias(payment, member)
-    assert alias == "jayme rudds"
+    assert alias == "dana whitfields"
     assert "dues" not in alias, "the memo noise word must not end up in the alias"
 
 
 def test_a_confirmed_alias_matches_directly_next_time():
     """The point of confirming: the next statement needs no suggestion at all."""
-    zack = member_from_name("Zack Florendo")
-    zack = Member(**{**zack.__dict__, "alt_keys": ("florendo zackary",)})
-    result = reconcile(dues_frame([(zelle("Zackary Florendo"), 65.0)]), [zack])
+    zach = member_from_name("Zach Calloway")
+    zach = Member(**{**zach.__dict__, "alt_keys": ("calloway zachariah",)})
+    result = reconcile(dues_frame([(zelle("Zachariah Calloway"), 65.0)]), [zach])
     assert result.summary()["paid"] == 1
     assert not result.unpaid
     assert result.suggestions() == []
 
 
 def test_a_shared_surname_alone_is_not_suggested():
-    """"Eugene Wang" against "Yung Cheng Wang" -- only the surname agrees."""
-    members = roster("Eugene Wang")
-    result = reconcile(dues_frame([(zelle("Yung Cheng Wang"), 50.0)]), members)
+    """"Victor Huang" against "Yi Ming Huang" -- only the surname agrees."""
+    members = roster("Victor Huang")
+    result = reconcile(dues_frame([(zelle("Yi Ming Huang"), 50.0)]), members)
     assert result.suggestions() == []
 
 
@@ -504,9 +504,9 @@ def test_replace_members_round_trips_aliases_and_the_paid_claim():
     backend.insert_term("FA26", "Fall 2026", "2026-08-01", "2026-12-18", "test@sandbox.local")
 
     member = Member(
-        full_name="Katherine McNamara",
-        match_key=match_key("Katherine McNamara"),
-        alt_keys=("kate mcnamara",),
+        full_name="Katherine Sullivan",
+        match_key=match_key("Katherine Sullivan"),
+        alt_keys=("kate sullivan",),
         preferred_name="Kate",
         claims_paid=True,
         email="k@example.edu",
@@ -533,7 +533,7 @@ def test_replace_members_round_trips_aliases_and_the_paid_claim():
     stored = backend.fetch_members("FA26")
     assert len(stored) == 1
     row = stored.iloc[0]
-    assert row["alt_keys"] == "kate mcnamara"
+    assert row["alt_keys"] == "kate sullivan"
     assert row["preferred_name"] == "Kate"
     assert int(row["claims_paid"]) == 1
 
@@ -560,20 +560,20 @@ def test_add_member_alias_persists_and_is_idempotent():
 
     backend = SqliteBackend()
     backend.insert_term("FA26", "Fall 2026", "2026-08-01", "2026-12-18", "test@sandbox.local")
-    key = match_key("Zack Florendo")
+    key = match_key("Zach Calloway")
     backend.replace_members(
-        "FA26", [{"full_name": "Zack Florendo", "match_key": key}], "roster.csv", "actor"
+        "FA26", [{"full_name": "Zach Calloway", "match_key": key}], "roster.csv", "actor"
     )
 
-    result = backend.add_member_alias("FA26", key, "florendo zackary", "treasurer@sandbox.local")
+    result = backend.add_member_alias("FA26", key, "calloway zachariah", "treasurer@sandbox.local")
     assert result.ok and result.updated == 1
     stored = backend.fetch_members("FA26").iloc[0]
-    assert stored["alt_keys"] == "florendo zackary"
+    assert stored["alt_keys"] == "calloway zachariah"
 
     # Confirming the same alias twice must not error or duplicate it.
-    again = backend.add_member_alias("FA26", key, "florendo zackary", "treasurer@sandbox.local")
+    again = backend.add_member_alias("FA26", key, "calloway zachariah", "treasurer@sandbox.local")
     assert again.ok and again.unchanged == 1
-    assert backend.fetch_members("FA26").iloc[0]["alt_keys"] == "florendo zackary"
+    assert backend.fetch_members("FA26").iloc[0]["alt_keys"] == "calloway zachariah"
 
 
 def test_add_member_alias_on_a_second_member_does_not_touch_the_first():

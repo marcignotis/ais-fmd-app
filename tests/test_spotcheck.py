@@ -255,13 +255,102 @@ def test_agreement_splits_by_tier():
         {"source": SPOT_CHECK_SOURCE, "model_committee": 5, "committee_id": 8, "model_source": "scored"},
     ]
     stats = spotcheck.agreement(labels)
-    assert stats["by_source"]["rule"] == {"checked": 2, "agreed": 2}
-    assert stats["by_source"]["scored"] == {"checked": 1, "agreed": 0}
+    assert (stats["by_source"]["rule"]["checked"], stats["by_source"]["rule"]["agreed"]) == (2, 2)
+    assert (stats["by_source"]["scored"]["checked"], stats["by_source"]["scored"]["agreed"]) == (1, 0)
 
 
 def test_agreement_with_nothing_checked():
     assert spotcheck.agreement([])["checked"] == 0
     assert spotcheck.agreement([{"source": "ledger"}])["checked"] == 0
+
+
+# --- Weights: turning a deliberately skewed sample back into an estimate -----
+
+def test_weights_add_back_up_to_the_population():
+    """
+    Every auto-applied row is stood for by exactly one sampled row's weight.
+    If the weights did not sum to the population, the weighted estimate would
+    silently cover more or less than the thing it claims to measure.
+    """
+    records, classifications = population({("rule", 1): 120, ("scored", 8): 30, ("scored", 5): 3})
+    sample = build_sample(records, classifications, size=20, seed=4)
+    assert sum(row.weight for row in sample.rows) == pytest.approx(sample.population)
+
+
+def test_every_stratum_with_rows_left_over_keeps_a_random_pick():
+    """
+    With a quota of one, largest-first used to take the stratum's only slot, so
+    the rest of that stratum was represented by nobody at all.
+    """
+    records, classifications = population({("rule", 1): 200, ("scored", 7): 6})
+    sample = build_sample(records, classifications, size=4, seed=5)
+    for stratum, size in sample.strata.items():
+        picks = [row for row in sample.rows if row.stratum == stratum]
+        if picks and size > len(picks):
+            assert any(row.pick == "random" for row in picks), stratum
+
+
+def test_largest_first_picks_stand_only_for_themselves():
+    records = [record(i, amount=-10.0) for i in range(30)]
+    records[17]["amount"] = -2000.0
+    classifications = [assigned(5, "scored") for _ in records]
+    sample = build_sample(records, classifications, size=5, seed=3)
+    biggest = next(row for row in sample.rows if row.index == 17)
+    assert biggest.pick == "largest"
+    assert biggest.weight == 1.0
+    others = [row for row in sample.rows if row.index != 17]
+    assert all(row.weight == pytest.approx(29 / 4) for row in others)
+
+
+def test_a_whole_stratum_taken_is_a_census():
+    records, classifications = population({("scored", 8): 3})
+    sample = build_sample(records, classifications, size=10, seed=1)
+    assert {row.pick for row in sample.rows} == {"census"}
+    assert all(row.weight == 1.0 for row in sample.rows)
+
+
+def test_weighted_rate_undoes_the_oversampling_of_a_rare_stratum():
+    """
+    The case the weights exist for. 1,000 exact-rule rows that are all right,
+    and 10 scored rows that are all wrong. A sample of 20 takes 10 of each:
+    the raw rate says 50%, but across the rows actually booked the model was
+    right 1000 times out of 1010.
+    """
+    right = {"source": SPOT_CHECK_SOURCE, "model_committee": 1, "committee_id": 1,
+             "model_source": "rule", "sample_weight": 100.0, "amount": -10.0}
+    wrong = {"source": SPOT_CHECK_SOURCE, "model_committee": 8, "committee_id": 7,
+             "model_source": "scored", "sample_weight": 1.0, "amount": -10.0}
+    stats = spotcheck.agreement([dict(right) for _ in range(10)] + [dict(wrong) for _ in range(10)])
+    assert stats["rate"] == 0.5
+    assert stats["weighted_rate"] == pytest.approx(1000 / 1010)
+    assert stats["margin"] is not None and stats["margin"] > 0
+
+
+def test_dollar_weighting_counts_money_not_rows():
+    big_wrong = {"source": SPOT_CHECK_SOURCE, "model_committee": 8, "committee_id": 7,
+                 "model_source": "scored", "sample_weight": 1.0, "amount": -900.0}
+    small_right = {"source": SPOT_CHECK_SOURCE, "model_committee": 8, "committee_id": 8,
+                   "model_source": "scored", "sample_weight": 1.0, "amount": -100.0}
+    stats = spotcheck.agreement([big_wrong, small_right])
+    assert stats["weighted_rate"] == pytest.approx(0.5)
+    assert stats["dollar_weighted_rate"] == pytest.approx(0.1)
+
+
+def test_labels_without_a_weight_count_only_towards_the_raw_rate():
+    """Spot-checks recorded before weights existed cannot be weighted honestly."""
+    legacy = {"source": SPOT_CHECK_SOURCE, "model_committee": 5, "committee_id": 5, "model_source": "rule"}
+    stats = spotcheck.agreement([legacy])
+    assert stats["checked"] == 1
+    assert stats["weighted_checked"] == 0
+    assert stats["weighted_rate"] is None
+
+
+def test_the_label_carries_its_weight():
+    row = spotcheck.SpotCheckRow(
+        index=0, record=record(0), committee_id=5, committee="5 - Membership",
+        rule="t", confidence=1.0, source="rule", amount=Decimal("-10"), weight=7.5, pick="random",
+    )
+    assert spotcheck.to_label(row, 5, "t@example.org", "2026-2027")["sample_weight"] == 7.5
 
 
 # --- The bias warning this exists to clear -----------------------------------

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
+from pathlib import Path
 
 import pandas as pd
 
@@ -25,10 +26,10 @@ from ..config.categories import (
 )
 from .categorize.predicates import is_venmo_or_zelle, mentions_dues
 from .categorize.scoring import (
-    CONFIRMED_CARDS,
-    ROSTER_ERA,
-    ROSTER_ERA_ENDS,
+    CardRegistry,
     card_number,
+    load_card_roster,
+    roster_status,
 )
 from .dedupe import identity_tuple
 from .dues import schedule_from_terms
@@ -306,101 +307,120 @@ def check_disputed_mappings(df_transactions, df_budgets, df_terms) -> Issue | No
     )
 
 
-def check_card_roster_era(df_transactions, df_budgets, df_terms) -> Issue | None:
+def check_card_roster_era(
+    df_transactions, df_budgets, df_terms, *, roster_path: Path | None = None
+) -> Issue | None:
     """
-    Card assignments confirmed under an officer cohort that has since turned over.
+    Whether the card roster still describes the cards people are spending on.
 
-    Treasury: "The cards might change around with new VPs, I will input their
-    numbers later." A card number is only evidence about a committee for as long
-    as the same person holds it, and nothing about a reissued card looks
-    different in a bank statement -- it keeps voting, just for the wrong
-    committee.
+    Reads `config/card_roster.json` -- the same file the categorizer reads.
+    This check used to read a Python copy of the roster, so updating the file
+    fixed categorization while this page kept reporting the old cards and told
+    the treasurer to go and edit `scoring.py`.
 
-    Card 8408 is the one that matters. `rule_consulting` treats it as a
-    certainty that ignores every other rule, including a mapping a human
-    confirmed, so if that card changed hands its spend is being booked to
-    Consulting with no way for any other evidence to correct it.
+    Since 2026-09-23 a confirmed card decides its row outright, so the roster
+    is the single most consequential input to categorization. Three things can
+    be wrong with it, in order of how much they cost:
 
-    Fires on transactions dated after the roster's cohort ended, because that is
-    when a stale roster starts doing damage rather than when the calendar says
-    a year rolled over.
+      1. The file cannot be read. No card evidence at all; every card purchase
+         falls through to weekday and merchant guesses or to the review queue.
+      2. The current cohort's window has ended. Cards stop applying on their
+         cohort's end date -- deliberately, because a card that changed hands
+         would otherwise keep booking a new VP's spending to the old VP's
+         committee -- so spending after it has no card evidence until the file
+         names the new cohort.
+      3. Cards in current spending that nobody has identified. Nothing is
+         mis-booked, but each of those purchases loses its best clue.
     """
+    status = roster_status(roster_path)
+    if status.error:
+        return Issue(
+            code="card_roster_era",
+            severity="high",
+            title="The card roster could not be read",
+            detail=(
+                f"{status.error}.\n\nNo card is being used to categorize anything "
+                "until this is fixed. Every card purchase is being decided from "
+                "merchant keywords and weekdays instead, or left for review. Fix "
+                "the file in `ais_fmd/config/card_roster.json`."
+            ),
+            count=0,
+        )
+
     if df_transactions is None or df_transactions.empty:
         return _no_issue()
     if "transaction_date" not in df_transactions.columns:
         return _no_issue()
 
     dates = pd.to_datetime(df_transactions["transaction_date"], errors="coerce")
-    after = df_transactions[dates > pd.Timestamp(ROSTER_ERA_ENDS)]
-    if after.empty:
-        return _no_issue()
-
-    cards = after["details"].map(lambda d: card_number(d) if d is not None else None)
-    carded = after[cards.notna()]
+    cards = df_transactions["details"].map(lambda d: card_number(d) if d is not None else None)
+    carded = df_transactions[cards.notna()].assign(_card=cards[cards.notna()], _date=dates[cards.notna()])
     if carded.empty:
         return _no_issue()
 
-    known = set(CONFIRMED_CARDS)
-    seen = set(cards.dropna())
-    on_known = carded[cards.dropna().isin(known).reindex(carded.index, fill_value=False)]
-    on_unknown = carded[~cards.dropna().isin(known).reindex(carded.index, fill_value=False)]
+    registry = CardRegistry(load_card_roster(roster_path))
+    era = status.current_era or "(none named)"
+    listing = ", ".join(
+        f"{card} -> {committee_name(a.committee_id)}" + (f" ({a.holder})" if a.holder else "")
+        for card, a in registry.items()
+        if a.era == status.current_era
+    ) or "no cards"
+    header = f"Current cohort in the card roster: {era}. Its cards: {listing}.\n"
 
-    roster = ", ".join(
-        f"{card} -> {committee_name(a.committee_id)} ({a.holder})"
-        for card, a in sorted(CONFIRMED_CARDS.items())
+    if status.era_ends is not None:
+        after = carded[carded["_date"] > pd.Timestamp(status.era_ends)]
+        if not after.empty:
+            return Issue(
+                code="card_roster_era",
+                severity="medium",
+                title="The card roster's officer cohort has ended",
+                detail=(
+                    header
+                    + f"\nThat cohort's window closed on {status.era_ends:%Y-%m-%d}, and "
+                    f"{len(after)} card purchase(s) are dated after it. Cards stop "
+                    "applying when their cohort ends -- a card that changed hands "
+                    "would otherwise keep booking the new VP's spending to the old "
+                    "VP's committee -- so those purchases have no card evidence.\n\n"
+                    "Collect the new officers' last-4 digits, then in "
+                    "`ais_fmd/config/card_roster.json` add the new cohort to `_eras`, "
+                    "point `_current_era` at it, and add the new cards."
+                ),
+                count=len(after),
+                rows=after.drop(columns=["_card", "_date"]).head(200),
+            )
+
+    in_era = carded
+    if status.era_starts is not None:
+        in_era = in_era[in_era["_date"] >= pd.Timestamp(status.era_starts)]
+    if in_era.empty:
+        return _no_issue()
+
+    known = in_era.apply(
+        lambda row: registry.get(row["_card"], row["_date"].date() if pd.notna(row["_date"]) else None)
+        is not None,
+        axis=1,
     )
-    header = (
-        f"The card roster was confirmed for the {ROSTER_ERA} officer cohort, "
-        f"which ended {ROSTER_ERA_ENDS:%Y-%m-%d}.\n\nCurrent roster: {roster}\n"
-    )
+    unknown = in_era[~known]
+    if unknown.empty:
+        return _no_issue()
 
-    # Two different failures, and which one you have changes what to do about
-    # it. Real Fall 2026 data showed the second: not one card in the statement
-    # appears in the roster, so the card signal contributes nothing at all --
-    # a quieter problem than a wrong assignment, and easier to miss precisely
-    # because nothing looks wrong.
-    if not on_known.empty:
-        return Issue(
-            code="card_roster_era",
-            severity="medium",
-            title="Card roster may predate the current officers",
-            detail=(
-                header
-                + f"\n{len(on_known)} transaction(s) after that date are still being "
-                "attributed through it. If a card was reissued to a new VP it now "
-                "points at the wrong committee, and nothing in the data looks any "
-                "different.\n\n"
-                "Card 8408 is the urgent one: it is an exact rule that outranks "
-                "every other signal including a confirmed merchant mapping, so a "
-                "wrong assignment there cannot be corrected by anything except "
-                "changing the roster.\n\n"
-                "Confirm the numbers with treasury, then update CONFIRMED_CARDS in "
-                "`domain/categorize/scoring.py` and bump ROSTER_ERA."
-            ),
-            count=len(on_known),
-            rows=on_known.head(200),
-        )
-
+    unseen = sorted(set(unknown["_card"]))
     return Issue(
         code="card_roster_era",
         severity="medium",
-        title="No card in current spending is on the roster",
+        title=f"{len(unseen)} card(s) in current spending are not on the roster",
         detail=(
             header
-            + f"\nEvery one of the {len(on_unknown)} card transaction(s) since then "
-            f"is on a card nobody has identified: {', '.join(sorted(seen))}. None of "
-            "the roster's cards appear at all, which is what a completed handover "
-            "looks like from inside the data.\n\n"
-            "Nothing is being mis-booked — an unknown card simply contributes no "
-            "evidence — but the card signal, normally one of the strongest inputs "
-            "to categorisation, is doing nothing. Every purchase on these cards "
-            "loses its best clue about which committee it belongs to and lands in "
-            "the review queue by default.\n\n"
-            "Ask treasury who holds them, then update CONFIRMED_CARDS in "
-            "`domain/categorize/scoring.py` and bump ROSTER_ERA."
+            + f"\n{len(unknown)} purchase(s) this cohort were made on "
+            f"{'a card' if len(unseen) == 1 else 'cards'} nobody has identified: "
+            f"{', '.join(unseen)}. Nothing is being mis-booked -- an unknown card "
+            "simply contributes no evidence -- but every one of those purchases "
+            "loses its best clue about which committee it belongs to.\n\n"
+            "Find out who holds them and add them to "
+            "`ais_fmd/config/card_roster.json` with the current era."
         ),
-        count=len(on_unknown),
-        rows=on_unknown.head(200),
+        count=len(unknown),
+        rows=unknown.drop(columns=["_card", "_date"]).head(200),
     )
 
 

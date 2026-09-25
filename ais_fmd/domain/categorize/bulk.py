@@ -53,7 +53,7 @@ KIND_MERCHANT = "merchant"
 KIND_MEMO = "transfer-memo"
 
 # The memo sits after the reference code on a Zelle row:
-#   "ZELLE FROM GILES GREENE ON 09/20 REF # BACQZL9WFMD1 GILES GREENE HEADSHOT"
+#   "ZELLE FROM PARKER LANE ON 09/20 REF # BACQZL9WFMD1 PARKER LANE HEADSHOT"
 _ZELLE_MEMO = re.compile(r"\bref\s*#?\s*\w+\s*(.*)$", re.I)
 _WHITESPACE = re.compile(r"\s+")
 

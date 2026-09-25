@@ -15,6 +15,7 @@ import pytest
 
 from ais_fmd.domain.categorize.merchants import MerchantMemory, merchant_key
 from ais_fmd.domain.categorize.pipeline import categorize_records
+from ais_fmd.domain.categorize.scoring import CardAssignment, CardRegistry
 from ais_fmd.domain.categorize.predicates import (
     DuesSchedule,
     DuesWindow,
@@ -133,64 +134,85 @@ def test_formal_memo_books_formal_in_both_directions():
     assert classify_deterministic(negative).committee_id == 18
 
 
-def test_consulting_card_rule():
-    result = classify_deterministic(
-        {"amount": -120.0, "details": wells("ZOOM.US", card="8408"), "account": "Wells Fargo"}
-    )
+# --- The card roster --------------------------------------------------------
+#
+# Treasury ruling, 2026-09-23: the card is the most highly valued evidence. A
+# purchase on a confirmed card is that card's committee -- and each card only
+# speaks for its own officer cohort, so a new cohort's cards replace the old
+# ones instead of both voting. The roster here is fixed in the test so these
+# assert behaviour, not this year's card numbers.
+
+COHORT_2024 = dict(era="2024-2026", starts=None, ends=date(2026, 7, 31))
+COHORT_2026 = dict(era="2026-2027", starts=date(2026, 8, 1), ends=date(2027, 7, 31))
+
+ROSTER = CardRegistry(
+    {
+        "8408": CardAssignment(7, "Consulting VP", verified=True, **COHORT_2024),
+        "5718": CardAssignment(5, "Membership VP", verified=True, **COHORT_2024),
+        "4831": CardAssignment(7, "Consulting VPs", verified=True, **COHORT_2026),
+        "0594": CardAssignment(5, "Membership VP", verified=True, **COHORT_2026),
+    }
+)
+
+
+def carded(card: str, when: str, merchant: str = "ZOOM.US", purchase: str = "10/24",
+           amount: float = -120.0) -> dict:
+    return {"amount": amount, "details": wells(merchant, purchase, card=card),
+            "account": "Wells Fargo", "transaction_date": when}
+
+
+def booked(row: dict):
+    return categorize_records([row], cards=ROSTER).classifications[0]
+
+
+def test_a_confirmed_card_decides_the_committee():
+    result = booked(carded("4831", "2026-10-26"))
+    assert result.committee_id == 7
+    assert result.source == "rule" and result.confidence == 1.0
+
+
+def test_the_card_beats_a_tuesday_food_run():
+    """
+    REVERSED 2026-09-23. The old ruling kept Tuesday/Wednesday food on a
+    Membership card as Meeting Food. Treasury now rules the card decides.
+    09/15/2026 is a Tuesday; this is a full meeting-food reading on 0594.
+    """
+    result = booked(carded("0594", "2026-09-16", "PUBLIX SUPER MAR", "09/15", -159.80))
+    assert result.committee_id == 5, "the card must outrank meeting-food timing"
+
+
+def test_consulting_food_on_a_meeting_day_stays_consulting():
+    """The overlap that got merchant memory removed: same restaurants, different committees."""
+    result = booked(carded("4831", "2026-09-16", "CHIPOTLE 1462", "09/15", -210.00))
     assert result.committee_id == 7
 
 
-def test_membership_officer_card_rule():
-    """
-    Card 8313 (Annalee) and card 5718 (Grant) are Membership by cardholder
-    assignment -- confirmed against treasury's "Categorization Architecture"
-    doc. A grocery run on that card is Membership even though nothing about
-    the merchant says so, the same way "card 8408" alone settles Consulting.
-    """
-    for card in ("8313", "5718"):
-        result = classify_deterministic(
-            {"amount": -20.58, "details": wells("PUBLIX GAINESVILLE", "10/26", card=card),
-             "account": "Wells Fargo"}
-        )
-        assert result.committee_id == 5, f"card {card} should resolve to Membership"
-        assert result.source == "rule"
+def test_an_old_cohorts_card_does_not_book_new_spending():
+    """8408 was the 2024-2026 Consulting VP's card. It is not carried over."""
+    result = booked(carded("8408", "2026-09-20"))
+    assert result.committee_id != 7
 
 
-def test_membership_card_rule_does_not_fire_on_other_cards():
-    result = classify_deterministic(
-        {"amount": -20.58, "details": wells("PUBLIX GAINESVILLE", "10/26", card="1113"),
-         "account": "Wells Fargo"}
-    )
+def test_an_old_cohorts_card_still_categorizes_its_own_statements():
+    assert booked(carded("8408", "2025-10-27")).committee_id == 7
+
+
+def test_a_new_cohorts_card_does_not_reach_back_before_its_cohort():
+    assert booked(carded("4831", "2026-03-02")).committee_id != 7
+
+
+def test_a_card_not_on_the_roster_decides_nothing():
+    result = booked(carded("1113", "2026-10-26", "PUBLIX GAINESVILLE", "10/24", -20.58))
     assert result.committee_id is None
 
 
-def test_meeting_food_wins_over_officer_card_default():
-    """
-    REGRESSION. Card 5718/8313 is Membership by default, but treasury reported
-    that meeting food has repeatedly been bought on the wrong person's card
-    due to card-issuance problems. A Tuesday/Wednesday food purchase on the
-    Membership card must stay Meeting Food, not flip to Membership.
-    """
-    record = {
-        "amount": -159.80,
-        "details": wells("PUBLIX SUPER MAR", "09/16", card="5718"),  # a Tuesday
-        "account": "Wells Fargo",
-        "transaction_date": "2025-09-18",
-    }
-    result = classify_deterministic(record)
-    assert result.committee_id == 8, "meeting-food timing must outrank the card default"
-
-
-def test_officer_card_default_still_fires_off_meeting_weekdays():
-    """The other half: outside the meeting-food window, the card default holds."""
-    record = {
-        "amount": -20.58,
-        "details": wells("PUBLIX GAINESVILLE", "10/26", card="5718"),  # a Saturday
-        "account": "Wells Fargo",
-        "transaction_date": "2025-10-28",
-    }
-    result = classify_deterministic(record)
-    assert result.committee_id == 5
+def test_no_card_is_hard_coded_in_the_rules():
+    """Card numbers live in config/card_roster.json, never in predicates."""
+    for card in ("8408", "8313", "5718"):
+        result = classify_deterministic(
+            {"amount": -120.0, "details": wells("ZOOM.US", "10/24", card=card), "account": "Wells Fargo"}
+        )
+        assert result.committee_id is None, f"card {card} is still a hard-coded rule"
 
 
 def test_meeting_food_runs_locally_without_a_model():
@@ -319,20 +341,6 @@ def test_pipeline_resolves_locally_and_sends_only_the_residual():
     assert run.rows_sent_to_model == 1
     # No model call happens in sandbox, so the residual stays unassigned.
     assert run.counts_by_source["none"] == 1
-
-
-def test_merchant_memory_is_consulted_before_rules():
-    """Memory is cheapest, so it must come first."""
-    details = wells("PUBLIX SUPER MAR", "09/16")
-    memory = MerchantMemory()
-    memory.remember(details, committee_id=13, purpose="Merch")  # deliberately odd
-
-    run = categorize_records(
-        [{"amount": -50.0, "details": details, "transaction_date": "2025-09-16", "account": "Wells Fargo"}],
-        memory,
-    )
-    assert run.classifications[0].committee_id == 13
-    assert run.classifications[0].source == "merchant"
 
 
 def test_pipeline_on_empty_input():

@@ -120,8 +120,8 @@ suggests 0153 is mostly meeting food, but that is inferred from the app's own
 past guesses, not from anything anyone confirmed — so it is not usable as
 evidence.
 
-For reference, the four that are known: 8408 Salena (Consulting), 8313 Annalee
-(Membership), 5718 Grant (Membership), 3568 Trent (President).
+For reference, the four that are known: 8408 (Consulting VP), 8313 and 5718
+(Membership VPs), 3568 (President).
 
 **The question:** for each of the seven, who held it and which committee's
 spending was it for? "Retired, no idea" is a useful answer too — it tells us to
@@ -208,3 +208,98 @@ different source of truth.
 1 and 2 are entered as data and take effect immediately — no code change. 3, 4,
 and 5 are one-line configuration changes each, but each one moves real money
 between committees, which is why none of them has been decided by inference.
+
+---
+
+# Round 2 — from the real Fall 2026 statement, 2026-09-08
+
+Found by running `Checking (4).csv` (171 rows, 2026-07-01 .. 2026-09-04) through
+the full pipeline. Nothing here was decided by inference; each item moves real
+money or changes a real total, so each needs an answer.
+
+## 6. Two $500 Zelles are counted as income, and probably should not be
+
+```
+2026-07-01   +500.00   ZELLE FROM [TREASURER] ... VENMO REIMBURSEMENT
+2026-07-01   +500.00   ZELLE FROM [TREASURER] ... VENMO TRANSFER
+```
+
+Both memos name Venmo, and both come from the treasurer rather than a member.
+That reads as the organisation's own money moving from the Venmo account into
+checking — not new revenue.
+
+**Why it matters:** $1,000 is **11% of this statement's $8,895 of incoming
+money**. Booked as income it overstates revenue by that much, and because the
+Venmo side is a separate account, the same dollars can be counted twice.
+
+**The question:** are these internal transfers (committee 3, Transfers) or
+genuine income? If transfers, is there a memo convention we can rely on going
+forward, now that Venmo is being retired?
+
+## 7. There is a dues rate the schedule does not know about
+
+Confirmed Fall 2026 rates are **$50 / $65**. The statement also contains:
+
+| Amount | Payments | Total | What the memos say |
+| --- | --- | --- | --- |
+| $35.00 | 9 | $315 | `MEMBERSHIP DUES`, `DUES`, **`AIS EXEC MEMBERSHIP FEE`** |
+| $20.00 | 1 | $20 | `MEMBERSHIP DUES  [MEMBER]` |
+| $15.00 | 2 | $30 | `[MEMBER] AIS DUES`, (no memo) |
+
+`AIS EXEC MEMBERSHIP FEE` is the telling one — $35 looks like a deliberate exec
+or officer rate, not a mistake. Two of the nine carry no memo at all and are
+only recognised as dues because the others establish the amount.
+
+**The question:** is $35 an official Fall 2026 rate? If so it should go in
+`terms.dues_rates` alongside 50 and 65, at which point all nine categorise
+deterministically. And are $20 / $15 partial payments, hardship rates, or
+something else?
+
+## 8. Ten cards now have no recorded holder — and one of them decides five rows
+
+**None of the three cards in this statement is in the roster**, so the card tier
+contributed *nothing* to it. Every card-based decision was made on merchant name,
+amount and weekday alone.
+
+| Card | Rows | What it bought |
+| --- | --- | --- |
+| **0594** | 5 | Sam's Club x3, Wal-Mart, Dick's Sporting Goods — all bulk goods |
+| 3526 | 2 | The Swamp \$307.75, Macdintons \$298.96 — large weekend bills |
+| 3466 | 1 | US Mobile \$96.00 |
+
+Plus seven still unresolved from the previous cohort: 0153, 7757, 9309, 3444,
+7193, 1113, 5535.
+
+**0594 is the highest-value single answer available.** Treasury's read is that
+its purchases are Membership, not Meeting Food. Confirmed as Membership, five
+rows resolve deterministically and stop reaching a human at all — verified by
+adding it to the roster and re-running: rows needing review went **14 to 8**.
+
+**The question:** who holds 0594, 3526 and 3466? Add them to
+`ais_fmd/config/card_roster.json` — a plain text file, no code change, no deploy.
+
+## 9. Still open from round 1
+
+7.1 disputed purpose mappings, and whether "headshot" is Professional
+Development or Membership. Unchanged.
+
+---
+
+**6, 7 and 8 are all data, not code.** Each is entered in a file or a form and
+takes effect on the next run.
+
+---
+
+# Round 3 — rulings, 2026-09-23
+
+| # | Ruling | Where it landed |
+| --- | --- | --- |
+| 8 | **Answered.** From the 09/21/26 E-Board notes: Consulting **4831**, Membership **0594** and **7101**, President **3526**. **3466** (US Mobile) is the treasurer's card: Treasury. Marketing and Prof Dev have no card. | `config/card_roster.json`, era `2026-2027` |
+| 10 | **The card is the most highly valued evidence.** A purchase on a confirmed card is that card's committee, ahead of every other rule. This reverses the 2026-08-24 reading that meeting-food timing beats the card, and the 2026-09-08 middle ground where a card only contested it. | `CardRegistry.certain`, first step of `pipeline.categorize_records` |
+| 11 | **No hard-coded cards; new cards replace old ones.** "card 8408 is Consulting" was the previous cohort's card. Every card is now a roster entry scoped to its officer cohort's dates, so 8408 still categorizes 2024-2026 statements and decides nothing from 2026-08-01. | `rule_consulting` and `rule_membership_card` removed; `_eras` in `card_roster.json` |
+| 12 | **Merchant rules are out of categorization.** Too many merchants serve more than one committee — Consulting food and Meeting Food especially — for a merchant's history to predict the next purchase. | merchant tier removed from the pipeline; Review Queue no longer offers "Remember this merchant" |
+
+Asserted in `tests/test_treasury_decisions.py` (the Fall 2026 cards, 8408 not
+carrying over, a Membership card at a Tuesday food run staying Membership, the
+treasurer's card) and `tests/test_scoring.py` (the card outweighing a full
+meeting-food reading).

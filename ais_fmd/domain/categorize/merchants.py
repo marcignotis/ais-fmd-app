@@ -17,7 +17,7 @@ still need a model shrinks every time the treasurer works the queue.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .predicates import Classification
 
@@ -94,7 +94,7 @@ _STOPWORD_KEYS = frozenset(
 _VENMO_SHAPED = re.compile(r"^\s*\d{10,}\s*\|")
 # Zelle rows read "ZELLE FROM JANE DOE ON 07/08 REF # ..." -- confirmed against
 # a real statement, where these were producing merchant keys like
-# "zelle from singh tanveer on ref".
+# "zelle from doe jane on ref".
 _TRANSFER_SHAPED = re.compile(r"^\s*(?:zelle|venmo)\s+(?:from|to)\b", re.I)
 
 
@@ -148,6 +148,61 @@ def merchant_key(details: object) -> str:
     return key
 
 
+# How consistent a merchant's history must be before its mapping is applied
+# without asking, and how many decisions that judgement needs to rest on.
+#
+# WHY THIS EXISTS. Merchant memory used to store one committee per merchant and
+# apply it at 0.95 confidence, short-circuiting everything else. That is right
+# for a merchant which genuinely only ever means one thing -- a website host is
+# always Technology, a print shop is always Merch -- and wrong for one that
+# legitimately spans committees. A bar can be a Membership social, a Consulting
+# client dinner, or a Professional Development event, and the flat mapping had
+# no way to express that: whichever committee was confirmed last won every
+# future transaction outright.
+#
+# The evidence for this is in the project's own measurements. `salty dog saloon`
+# is settled as **Consulting** across 10 human decisions, while the hardcoded
+# "bars are Membership" signal measured 38% precision and earned a fitted weight
+# of exactly 0.00. A single stored answer cannot represent "7 Consulting, 3
+# Membership" -- and that split is the useful thing to know.
+#
+# So a rule now carries the whole distribution. Consistent merchants
+# short-circuit exactly as before; split ones contribute weighted evidence to
+# scoring instead and let the surrounding context (card, memo, weekday, amount)
+# break the tie, which is what routes them to a human rather than a coin-flip.
+CONSISTENCY_THRESHOLD = 0.8
+MIN_DECISIONS_TO_TRUST = 3
+
+
+def parse_committee_counts(text: object) -> dict[int, int]:
+    """
+    Read the stored distribution: "5:3,7:7" -> {5: 3, 7: 7}.
+
+    A compact string rather than a join table, matching how `alt_keys` already
+    stores its list on `members`. Unparseable fragments are skipped rather than
+    raising -- a malformed counter must degrade to "no history", never take down
+    categorisation for every row.
+    """
+    counts: dict[int, int] = {}
+    for part in str(text or "").split(","):
+        part = part.strip()
+        if not part or ":" not in part:
+            continue
+        committee, _, tally = part.partition(":")
+        try:
+            key, value = int(committee), int(tally)
+        except ValueError:
+            continue
+        if value > 0:
+            counts[key] = counts.get(key, 0) + value
+    return counts
+
+
+def format_committee_counts(counts: dict[int, int]) -> str:
+    """The inverse of `parse_committee_counts`, sorted so the value is stable."""
+    return ",".join(f"{c}:{n}" for c, n in sorted(counts.items()) if n > 0)
+
+
 @dataclass(frozen=True)
 class MerchantRule:
     key: str
@@ -156,6 +211,76 @@ class MerchantRule:
     purpose: str
     hit_count: int = 0
     source: str = "learned"
+    # committee_id -> how many times a human filed this merchant there. Empty
+    # for a rule predating this column; `decisions` falls back to treating the
+    # stored `committee_id` as a single decision so old rows still behave.
+    committee_counts: dict[int, int] = field(default_factory=dict)
+
+    @property
+    def decisions(self) -> dict[int, int]:
+        """The distribution, with a sensible reading of a legacy single-answer row."""
+        if self.committee_counts:
+            return self.committee_counts
+        return {self.committee_id: max(self.hit_count, 1)}
+
+    @property
+    def decision_count(self) -> int:
+        return sum(self.decisions.values())
+
+    @property
+    def consistency(self) -> float:
+        """Share of decisions that went to the most common committee. 0.0-1.0."""
+        decisions = self.decisions
+        total = sum(decisions.values())
+        if not total:
+            return 0.0
+        return max(decisions.values()) / total
+
+    @property
+    def dominant_committee(self) -> int:
+        """The most-chosen committee; ties break on the lowest id, for determinism."""
+        decisions = self.decisions
+        if not decisions:
+            return self.committee_id
+        return min(decisions.items(), key=lambda kv: (-kv[1], kv[0]))[0]
+
+    @property
+    def is_disputed(self) -> bool:
+        """More than one committee has ever been chosen for this merchant."""
+        return len([n for n in self.decisions.values() if n > 0]) > 1
+
+    @property
+    def is_settled(self) -> bool:
+        """
+        Consistent enough to apply without asking.
+
+        **A unanimous merchant is settled at any count, including one.** That is
+        deliberate, and an earlier version of this got it wrong by requiring
+        three decisions unconditionally: it broke the case the feature exists
+        for. When a treasurer ticks "Remember this merchant" in the review
+        queue, that is an *instruction*, not an observation -- they are telling
+        the app that a website host is Technology. Making them say it three
+        times before it takes effect is the opposite of learning from them.
+
+        The threshold applies only once a merchant is **disputed** -- once two
+        different committees have genuinely been chosen for it. Then, and only
+        then, does the count matter: one dissenting decision against nine should
+        not unsettle a merchant, but a 4/3 split should, and that is a question
+        about the weight of evidence rather than about the merchant's identity.
+        """
+        if not self.is_disputed:
+            return self.decision_count >= 1
+        return (
+            self.decision_count >= MIN_DECISIONS_TO_TRUST
+            and self.consistency >= CONSISTENCY_THRESHOLD
+        )
+
+    def explain_split(self) -> str:
+        """'7x Consulting, 3x Membership' -- what a treasurer needs to see."""
+        from ...config.categories import committee_name
+
+        parts = sorted(self.decisions.items(), key=lambda kv: (-kv[1], kv[0]))
+        return ", ".join(f"{n}x {committee_name(c)}" for c, n in parts)
 
 
 class MerchantMemory:
@@ -176,29 +301,122 @@ class MerchantMemory:
                 purpose=str(record.get("purpose") or ""),
                 hit_count=int(record.get("hit_count") or 0),
                 source=str(record.get("source") or "learned"),
+                committee_counts=parse_committee_counts(record.get("committee_counts")),
             )
             for record in records
             if record.get("merchant_key") and record.get("committee_id") is not None
         ]
         return cls(rules)
 
+    @classmethod
+    def from_labels(cls, labels: list[dict]) -> "MerchantMemory":
+        """
+        Build memory from the decision log rather than the merchants table.
+
+        `labeled_examples` records every review-queue decision with its original
+        description and the committee the human chose, so the distribution can be
+        derived from what actually happened instead of from a denormalised
+        counter that can drift out of step with it. This is the honest source;
+        the merchants table is the cache.
+
+        Rows whose description yields no stable merchant key -- Venmo and Zelle
+        transfers, which are person-specific -- are skipped, for the same reason
+        `remember` refuses them: a rule keyed on one member's name would
+        mis-categorise everything they ever pay.
+        """
+        counts: dict[str, dict[int, int]] = {}
+        purposes: dict[str, str] = {}
+        for label in labels:
+            key = merchant_key(label.get("details"))
+            if not key or label.get("committee_id") is None:
+                continue
+            try:
+                committee = int(label["committee_id"])
+            except (TypeError, ValueError):
+                continue
+            counts.setdefault(key, {})
+            counts[key][committee] = counts[key].get(committee, 0) + 1
+            if label.get("purpose"):
+                purposes.setdefault(key, str(label["purpose"]))
+
+        rules = [
+            MerchantRule(
+                key=key,
+                canonical_name=key.title(),
+                committee_id=min(tally.items(), key=lambda kv: (-kv[1], kv[0]))[0],
+                purpose=purposes.get(key, ""),
+                hit_count=sum(tally.values()),
+                source="derived",
+                committee_counts=tally,
+            )
+            for key, tally in counts.items()
+        ]
+        return cls(rules)
+
     def __len__(self) -> int:
         return len(self._rules)
 
-    def lookup(self, details: object) -> Classification | None:
+    def rule_for(self, details: object) -> MerchantRule | None:
+        """The stored rule for this description, settled or not."""
         key = merchant_key(details)
         if not key:
             return None
-        rule = self._rules.get(key)
-        if rule is None:
+        return self._rules.get(key)
+
+    def lookup(self, details: object) -> Classification | None:
+        """
+        A confident answer, or None.
+
+        Returns a classification **only for a settled merchant** -- one a human
+        has filed consistently, enough times to be a rule rather than an
+        anecdote. A contested merchant deliberately returns None here so the row
+        falls through to scoring, where `contested_signals` contributes its
+        history as weighted evidence alongside the card, the memo and the
+        weekday rather than overriding all of them.
+        """
+        rule = self.rule_for(details)
+        if rule is None or not rule.is_settled:
             return None
+        committee = rule.dominant_committee
+        confidence = 0.95 if rule.consistency == 1.0 else 0.85
+        detail = (
+            f"Merchant memory: {rule.canonical_name}"
+            if rule.consistency == 1.0
+            else f"Merchant memory: {rule.canonical_name} ({rule.explain_split()})"
+        )
         return Classification(
-            committee_id=rule.committee_id,
+            committee_id=committee,
             purpose=rule.purpose or None,
-            rule=f"Merchant memory: {rule.canonical_name}",
-            confidence=0.95,
+            rule=detail,
+            confidence=confidence,
             source="merchant",
         )
+
+    def contested_signals(self, details: object) -> list[tuple[int, float, str]]:
+        """
+        A split merchant's history, as (committee_id, share, reason) triples.
+
+        `share` is that committee's fraction of the decisions, so a 7/3 split
+        contributes 0.7 to one committee and 0.3 to the other. The caller
+        multiplies by a weight -- keeping the arithmetic in `scoring`, where
+        every other weight already lives.
+
+        Empty for a settled merchant (`lookup` already answered) and for an
+        unknown one (there is nothing to say).
+        """
+        rule = self.rule_for(details)
+        if rule is None or rule.is_settled:
+            return []
+        decisions = rule.decisions
+        total = sum(decisions.values())
+        if total < 2:
+            # A single decision is not a distribution. Saying "100% Consulting"
+            # off one data point is exactly the overconfidence being removed.
+            return []
+        return [
+            (committee, count / total, f"{rule.canonical_name}: {count} of {total} decisions")
+            for committee, count in sorted(decisions.items(), key=lambda kv: (-kv[1], kv[0]))
+        ]
 
     def remember(
         self,
@@ -213,15 +431,41 @@ class MerchantMemory:
         if not key:
             return None
         existing = self._rules.get(key)
+
+        # Accumulate rather than overwrite. The previous version replaced
+        # `committee_id` outright, so the most recent decision silently erased
+        # every earlier one -- a merchant a treasurer had filed under Consulting
+        # nine times became Membership the tenth time somebody chose it there,
+        # with no trace that the disagreement had ever happened.
+        counts = dict(existing.decisions) if existing else {}
+        counts[committee_id] = counts.get(committee_id, 0) + 1
+
         rule = MerchantRule(
             key=key,
             canonical_name=canonical_name or (existing.canonical_name if existing else key),
-            committee_id=committee_id,
+            # Kept as the dominant reading so a legacy consumer of this column
+            # still sees the merchant's most common committee, not its latest.
+            committee_id=min(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0],
             purpose=purpose or "",
             hit_count=(existing.hit_count if existing else 0) + 1,
+            committee_counts=counts,
         )
         self._rules[key] = rule
         return rule
+
+    def contested(self) -> list[MerchantRule]:
+        """Merchants a human has filed inconsistently. The review-worthy set."""
+        return sorted(
+            (rule for rule in self._rules.values() if not rule.is_settled and rule.decision_count > 1),
+            key=lambda rule: (-rule.decision_count, rule.key),
+        )
+
+    def settled(self) -> list[MerchantRule]:
+        """Merchants consistent enough to apply without asking."""
+        return sorted(
+            (rule for rule in self._rules.values() if rule.is_settled),
+            key=lambda rule: (-rule.decision_count, rule.key),
+        )
 
     def as_records(self) -> list[dict]:
         return [
@@ -232,6 +476,7 @@ class MerchantMemory:
                 "purpose": rule.purpose,
                 "hit_count": rule.hit_count,
                 "source": rule.source,
+                "committee_counts": format_committee_counts(rule.decisions),
             }
             for rule in sorted(self._rules.values(), key=lambda r: -r.hit_count)
         ]

@@ -40,11 +40,30 @@ auth.login_gate()
 
 # --- Navigation --------------------------------------------------------------
 #
-# MVP SCOPE. `Reimbursements` is commented out rather than deleted: the page,
-# its domain module, its tests and its SQLite tables all still exist and still
-# pass, and the Postgres side is written and waiting in
-# migrations/002_deferred_features.sql. Turning it back on means uncommenting
-# one line and running that migration. Nothing else imports it -- verified.
+# MVP SCOPE. Two pages are commented out rather than deleted. In both cases the
+# page, its domain module, its tests and its SQLite tables all still exist and
+# still pass, and the Postgres side is written and waiting in
+# migrations/002_deferred_features.sql. Turning either back on means
+# uncommenting one line and running that migration.
+#
+#   Reimbursements  -- deferred from the start.
+#
+#   Officer Access  -- deferred 2026-09-08, for the first production term.
+#     This is the VP portal's admin page: it maps an email to a role and a
+#     committee, which is what Google sign-in looks up in `profiles`. The first
+#     term is treasurer-only, so nothing needs those mappings yet -- and leaving
+#     the page on would have shipped a feature whose table lives in a migration
+#     marked "do not run", giving a PostgREST error on a table that does not
+#     exist. Removing it also drops the Google Cloud OAuth registration and the
+#     one code path that could not be tested locally (the st.login() round-trip)
+#     off the launch checklist entirely.
+#
+#     Note this does NOT disable Google sign-in itself: `auth.login_gate` still
+#     offers it whenever an `[auth]` section is configured, and is inert
+#     otherwise. It only removes the page for managing who gets in that way.
+#
+# `Officer.py` ("My Committee") is deliberately NOT in this list -- it is a
+# read-only committee view that a treasurer outranks, and it stays available.
 
 PAGES = [
     ("ais_fmd/views/Home.py", "Home", ":material/home:", auth.Role.MEMBER),
@@ -60,7 +79,7 @@ PAGES = [
     ("ais_fmd/views/Planner.py", "Scenario Planner", ":material/insights:", auth.Role.TREASURER),
     ("ais_fmd/views/Treasury.py", "Treasury", ":material/account_balance:", auth.Role.TREASURER),
     ("ais_fmd/views/DataQuality.py", "Data Quality", ":material/health_and_safety:", auth.Role.TREASURER),
-    ("ais_fmd/views/OfficerAccess.py", "Officer Access", ":material/admin_panel_settings:", auth.Role.TREASURER),
+    # ("ais_fmd/views/OfficerAccess.py", "Officer Access", ":material/admin_panel_settings:", auth.Role.TREASURER),  # MVP: deferred
     ("ais_fmd/views/AuditLog.py", "Audit Log", ":material/history:", auth.Role.TREASURER),
     ("ais_fmd/views/Assistant.py", "Assistant", ":material/smart_toy:", auth.Role.MEMBER),
     ("ais_fmd/views/Runbook.py", "Runbook", ":material/menu_book:", auth.Role.MEMBER),
@@ -97,6 +116,7 @@ if settings.is_sandbox():
         "folder is touched."
     )
 
+shell.mode_switch()
 shell.sidebar_footer()
 
 navigation.run()

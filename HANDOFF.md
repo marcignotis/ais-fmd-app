@@ -311,10 +311,10 @@ this categorizer was originally specced from:
 
 | Card | Holder | Committee | Strength |
 | --- | --- | --- | --- |
-| 8408 | Salena | Consulting (7) | **certainty** — exact rule, spec says it wins outright |
-| 8313 | Annalee | Membership (5) | default — heuristic tier |
-| 5718 | Grant | Membership (5) | default — heuristic tier |
-| 3568 | Trent | **President (4)** | default — note: *not* Membership, despite 13 Macdintons visits |
+| 8408 | Consulting VP | Consulting (7) | **certainty** — exact rule, spec says it wins outright |
+| 8313 | Membership VP | Membership (5) | default — heuristic tier |
+| 5718 | Membership VP | Membership (5) | default — heuristic tier |
+| 3568 | President | **President (4)** | default — note: *not* Membership, despite 13 Macdintons visits |
 
 Seven other cards appear in **the 892-row historical data** (see the top-of-doc
 notice — not currently loaded) with **no documented owner** (0153, 7757, 9309,
@@ -872,8 +872,8 @@ owes dues" against an uploaded membership list, not just "how much came in."
 **Why matching is its own module, not a string comparison.** Three properties
 of the real Fall 2026 data make `payer == member` wrong often enough to be
 useless: Wells Fargo emits names in both orders in the same file
-("SCHUCK JOHN" and "CAMERYN WEITZ"); people pay dues on each other's behalf and
-say so in the memo ("NICOLAS SANDERS ... JAYME RUDDS DUES"); and 64 of 149
+("PARK OWEN" and "TESSA MORROW"); people pay dues on each other's behalf and
+say so in the memo ("MARCUS HOLLOWAY ... DANA WHITFIELDS DUES"); and 64 of 149
 members on the Fall 2026 form go by a preferred name ("Katherine" → "Kate")
 that the bank data uses freely. `normalize_name` handles order and noise words;
 matching searches the memo *before* the payer, because a memo naming someone
@@ -896,11 +896,11 @@ for the full breakdown; not worth re-deriving, the numbers won't move until
 someone acts on them.
 
 **`Reconciliation.suggestions()`** finds near-misses a strict match refuses —
-"ZACKARY FLORENDO" against a roster reading "Zack Florendo" — and shows them to
+"ZACHARIAH CALLOWAY" against a roster reading "Zach Calloway" — and shows them to
 a treasurer to confirm, never auto-credits. Confirming (`add_member_alias`,
 wired to a button in the Roster page's "Likely matches" tab) teaches the
 roster that spelling permanently, so the next statement matches it directly.
-Two real ones were confirmed this session: Zack Florendo, Jayme Rudd.
+Two real ones were confirmed this session: Zach Calloway, Dana Whitfield.
 
 **Outstanding:**
 

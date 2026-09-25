@@ -3,24 +3,27 @@ Categorization orchestration.
 
 The order is the whole point:
 
-    1. Exact rules       -- unambiguous markers: card number, exact dues amount,
-                            sign of a transfer. Certainties.
-    2. Merchant memory   -- free, instant, and the set grows with every correction
-    3. Heuristic rules   -- keyword and weekday guesses
-    4. The model         -- only what is genuinely left over
+    1. The card roster  -- a purchase on a card treasury has confirmed for the
+                           current officer cohort is that card's committee.
+                           Outranks everything (treasury ruling, 2026-09-23).
+    2. Exact rules      -- unambiguous markers: exact dues amount, a memo, the
+                           sign of a transfer. Certainties.
+    3. Scoring          -- keyword, weekday and amount evidence, gated on
+                           confidence; the uncertain rest goes to a human
+    4. The model        -- only what is genuinely left over
 
 The original ran the model *first*, over every transaction, and then overrode
 most of its answers with Python rules -- paying for answers it discarded. This
 inverts that.
 
-FINDING (ordering). Merchant memory used to run ahead of *all* the rules, which
-let a learned mapping override an exact one. Real data made the consequence
-concrete: two Publix purchases were made on the consulting card, so
-`rule_consulting` books them to Consulting -- correctly, and the spec is
-emphatic that "card 8408" wins and all remaining rules are ignored. A blanket
-"publix -> Meeting Food" mapping, the obvious thing for a treasurer to confirm
-in bulk, would silently have re-booked them. The exact rules now run first, so a
-merchant mapping can only fill in where the certainties are silent.
+MERCHANT MEMORY IS GONE (2026-09-23). A tier between 2 and 3 used to book a
+merchant the way a human had filed it before. Treasury ruled it out: the same
+merchant serves too many committees -- Consulting food and Meeting Food
+especially come from the same restaurants -- for its history to predict the
+next purchase, and a remembered merchant was able to override the card, which
+is the one piece of evidence that actually says whose spending it was. What a
+treasurer decides in the Review Queue is still logged as a label (for the
+spot-check and evaluation tools); it just no longer turns into a rule.
 """
 
 from __future__ import annotations
@@ -30,7 +33,6 @@ from dataclasses import dataclass, field
 import pandas as pd
 
 from .llm import LLMOutcome, classify_residual
-from .merchants import MerchantMemory
 from .predicates import (
     UNMATCHED,
     Classification,
@@ -57,7 +59,7 @@ class CategorizationRun:
 
     @property
     def counts_by_source(self) -> dict[str, int]:
-        counts = {"merchant": 0, "rule": 0, "scored": 0, "llm": 0, "none": 0}
+        counts = {"rule": 0, "scored": 0, "llm": 0, "none": 0}
         for item in self.classifications:
             counts[item.source] = counts.get(item.source, 0) + 1
         return counts
@@ -85,7 +87,7 @@ class CategorizationRun:
 
     @property
     def rows_resolved_locally(self) -> int:
-        return self.counts_by_source["merchant"] + self.counts_by_source["rule"]
+        return self.counts_by_source["rule"]
 
     def summary_line(self) -> str:
         counts = self.counts_by_source
@@ -99,7 +101,6 @@ class CategorizationRun:
 
 def categorize_records(
     records: list[dict],
-    merchants: MerchantMemory | None = None,
     *,
     cards: CardRegistry | None = None,
     dues: DuesSchedule | None = None,
@@ -108,17 +109,15 @@ def categorize_records(
     """
     Classify a list of transaction dicts.
 
-    The scoring tier (M18) replaces what used to be a first-match-wins run
-    through the heuristic rules. A scored result is only accepted when its
-    confidence clears `threshold`; below that it is kept as a *proposal* --
-    committee, confidence and evidence intact -- and the row goes to the review
-    queue rather than being booked on a coin-flip. `run.proposals` carries those
-    so the queue can show its reasoning instead of an empty cell.
+    A scored result is only accepted when its confidence clears `threshold`;
+    below that it is kept as a *proposal* -- committee, confidence and evidence
+    intact -- and the row goes to the review queue rather than being booked on a
+    coin-flip. `run.proposals` carries those so the queue can show its
+    reasoning instead of an empty cell.
 
     `dues` supplies per-term dues rates. Omitted, `rule_dues` falls back to the
     Fall 2024 constant it always used -- see `predicates.DuesSchedule`.
     """
-    memory = merchants or MerchantMemory()
     registry = cards or CardRegistry()
     # Bound once, not per row: `exact_rules` builds a partial when a schedule is
     # supplied, and this loop runs 892 times on the real table.
@@ -128,8 +127,15 @@ def categorize_records(
     residual: list[tuple[int, dict]] = []
 
     for index, record in enumerate(records):
-        # Certainties first: an exact dues amount, a transfer's sign, card 8408.
-        # These are unambiguous by construction and must not be outvoted.
+        # The card first. A confirmed card in its cohort's dates says whose
+        # spending this was, and nothing below -- merchant, weekday, amount --
+        # is allowed to argue with it.
+        carded = registry.certain(record)
+        if carded is not None:
+            results[index] = carded
+            continue
+
+        # Certainties: an exact dues amount, a memo, a transfer's sign.
         exact = first_match(record, rules)
         if exact.is_assigned:
             results[index] = exact
@@ -140,20 +146,9 @@ def categorize_records(
         # committee. `rule_reimbursement` is the case that matters -- an outgoing
         # transfer is now a question rather than an automatic booking to
         # Refunded, and the review queue reads `match_rule` to phrase it. Keep it
-        # as the fallback and carry on: merchant memory or scoring may still find
-        # a real answer, and either overwrites this.
+        # as the fallback and carry on: scoring may still find a real answer.
         if exact.rule:
             results[index] = exact
-
-        # A merchant mapping is a human's explicit decision about this exact
-        # merchant, so it short-circuits rather than competing as a signal. As a
-        # signal it lost: a confirmed mapping and a full meeting-food reading
-        # scored close enough to flag each other, which would have sent a row a
-        # treasurer had already ruled on straight back into their queue.
-        remembered = memory.lookup(record.get("details"))
-        if remembered is not None:
-            results[index] = remembered
-            continue
 
         scored = score(record, cards=registry)
         if scored.winner is not None:
@@ -174,7 +169,6 @@ def categorize_records(
 
 def categorize_frame(
     df: pd.DataFrame,
-    merchants: MerchantMemory | None = None,
     *,
     dues: DuesSchedule | None = None,
 ) -> tuple[pd.DataFrame, CategorizationRun]:
@@ -196,7 +190,7 @@ def categorize_frame(
         return out, CategorizationRun()
 
     records = out.to_dict("records")
-    run = categorize_records(records, merchants, dues=dues)
+    run = categorize_records(records, dues=dues)
 
     out["budget_category"] = [item.committee_id for item in run.classifications]
     out["purpose"] = [item.purpose for item in run.classifications]

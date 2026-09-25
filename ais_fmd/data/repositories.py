@@ -299,6 +299,80 @@ def record_labels(examples: list[dict], actor: str) -> UpdateResult:
     return result
 
 
+# --- Cached derived computations ---------------------------------------------
+#
+# FINDING (performance). Every *read* above is cached against the version
+# counter, and then nothing cached the work built on top of them. Measured with
+# scripts/profile_hotpath.py on 513 transactions:
+#
+#     alerts.evaluate            389 ms
+#     reconcile.reconcile_all    301 ms
+#     quality.run_all_checks      62 ms
+#
+# Streamlit re-runs the whole script on every widget interaction, so Home paid
+# ~363 ms and Alerts & Reports ~389 ms of that per click -- and roughly 300 ms
+# of the second figure is `reconcile_all` running a *second* time, because
+# `_reconciliation_alerts` calls it internally. On a shared-CPU host, 2-3x that.
+#
+# These three are the whole problem, and they are pure functions of data the
+# version counter already tracks, so caching them needs no new invalidation
+# logic. Keyed on `version` for the same reason the reads are: a write bumps it
+# and every derived figure recomputes exactly once.
+#
+# These take no data arguments and load what they need themselves, deliberately.
+# Passing the frames in would put them in the cache key, and Streamlit hashes a
+# DataFrame by value -- so every call would walk the whole transactions table to
+# decide whether it could skip walking the whole transactions table. Every
+# caller was passing unfiltered frames straight from the loaders above anyway,
+# so the version counter alone identifies the answer exactly.
+#
+# A caller that genuinely needs one of these over a *filtered* frame should call
+# the domain function directly and accept the cost; nothing does today.
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _cached_alerts(version: int, semester: str | None):
+    from ..domain import alerts as alerts_domain
+
+    bundle = load_bundle()
+    return alerts_domain.evaluate(
+        bundle.transactions,
+        bundle.budgets,
+        bundle.terms,
+        load_statement_balances(),
+        semester=semester,
+    )
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _cached_quality(version: int):
+    from ..domain import quality
+
+    bundle = load_bundle()
+    return quality.run_all_checks(bundle.transactions, bundle.budgets, bundle.terms)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _cached_reconciliation(version: int):
+    from ..domain import reconcile
+
+    return reconcile.reconcile_all(load_transactions(), load_statement_balances())
+
+
+def evaluate_alerts(semester: str | None = None):
+    """`domain.alerts.evaluate` over the current data, memoized until the next write."""
+    return _cached_alerts(data_version(), semester)
+
+
+def run_quality_checks():
+    """`domain.quality.run_all_checks` over the current data, memoized until the next write."""
+    return _cached_quality(data_version())
+
+
+def reconcile_all():
+    """`domain.reconcile.reconcile_all` over the current data, memoized until the next write."""
+    return _cached_reconciliation(data_version())
+
+
 def locked_semesters() -> set[str]:
     """Names of terms currently closed to edits."""
     terms = load_terms()

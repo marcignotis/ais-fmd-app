@@ -41,9 +41,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from ais_fmd.config.categories import COMMITTEE_BY_ID, committee_label
 from ais_fmd.data.sqlite_backend import SqliteBackend
 from ais_fmd.domain.categorize import spotcheck
-from ais_fmd.domain.categorize.merchants import MerchantMemory
 from ais_fmd.domain.categorize.pipeline import categorize_records
-from ais_fmd.domain.categorize.scoring import CURRENT_ERA
+from ais_fmd.domain.categorize.scoring import current_era
 from ais_fmd.domain.dues import schedule_from_terms
 
 DEFAULT_OUTPUT = "spot_check.csv"
@@ -59,15 +58,15 @@ FIELDNAMES = [
     "confidence",
     "rule",
     "transaction_id",
+    "sample_weight",
 ]
 
 
 def classify(backend: SqliteBackend):
     transactions = backend.fetch_transactions()
     records = transactions.to_dict("records")
-    memory = MerchantMemory.from_records(backend.fetch_merchants().to_dict("records"))
     schedule = schedule_from_terms(backend.fetch_terms())
-    run = categorize_records(records, memory, dues=schedule)
+    run = categorize_records(records, dues=schedule)
     return records, run
 
 
@@ -109,6 +108,7 @@ def do_sample(backend: SqliteBackend, output: Path, size: int, seed: int) -> int
                     "confidence": f"{row.confidence:.2f}",
                     "rule": row.rule,
                     "transaction_id": row.record.get("transactionid") or "",
+                    "sample_weight": f"{row.weight:.4f}" if row.weight is not None else "",
                 }
             )
 
@@ -176,6 +176,7 @@ def do_apply(backend: SqliteBackend, path: Path, actor: str, era: str) -> int:
             confidence=classification.confidence,
             source=classification.source,
             amount=None,
+            weight=_parse_weight(row.get("sample_weight")),
         )
         labels.append(spotcheck.to_label(sample_row, committee_id, actor, era))
 
@@ -221,13 +222,40 @@ def do_report(backend: SqliteBackend) -> int:
         return 1
 
     print(f"Spot-checked {stats['checked']} auto-applied rows.")
-    print(f"   model agreed with the human: {stats['agreed']} ({stats['rate'] * 100:.1f}%)")
+    print(f"   raw agreement              : {stats['agreed']} ({stats['rate'] * 100:.1f}%)")
+    if stats["weighted_rate"] is not None:
+        print(
+            f"   estimated accuracy         : {stats['weighted_rate'] * 100:.1f}% "
+            f"+/- {stats['margin'] * 100:.1f} points "
+            f"(from {stats['weighted_checked']} weighted rows, "
+            f"effective n {stats['effective_n']:.0f})"
+        )
+        if stats["dollar_weighted_rate"] is not None:
+            print(
+                f"   share of money booked right: {stats['dollar_weighted_rate'] * 100:.1f}%"
+            )
+        print(
+            "   The raw figure over-counts rare committees and large amounts, which\n"
+            "   the sample picks on purpose; the estimate weights them back."
+        )
+    else:
+        print("   (no weighted rows yet -- re-sample to get an accuracy estimate)")
     print()
-    print("by tier:")
+    print("by tier (raw, then weighted):")
     for source, entry in sorted(stats["by_source"].items()):
         rate = entry["agreed"] / entry["checked"] * 100 if entry["checked"] else 0.0
-        print(f"   {source:8} {entry['agreed']:4}/{entry['checked']:<4} {rate:5.1f}%")
+        weighted = entry.get("weighted_rate")
+        weighted_text = f"{weighted * 100:5.1f}%" if weighted is not None else "   --"
+        print(f"   {source:8} {entry['agreed']:4}/{entry['checked']:<4} {rate:5.1f}%   {weighted_text}")
     return 0
+
+
+def _parse_weight(value: object) -> float | None:
+    try:
+        weight = float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return weight if weight > 0 else None
 
 
 def main() -> int:
@@ -238,7 +266,7 @@ def main() -> int:
     parser.add_argument("--size", type=int, default=40)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--actor", default="spot-check")
-    parser.add_argument("--era", default=CURRENT_ERA)
+    parser.add_argument("--era", default=current_era())
     parser.add_argument("--db", type=Path)
     args = parser.parse_args()
 

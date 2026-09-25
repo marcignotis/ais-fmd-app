@@ -33,7 +33,7 @@ from dataclasses import dataclass
 
 from ...config.categories import COMMITTEE_BY_ID, committee_name
 from .merchants import merchant_key
-from .scoring import CONFIRMED_CARDS, card_number
+from .scoring import CardRegistry, card_number, current_era
 
 # Caps, so the prompt cannot grow without bound as labels accumulate.
 MAX_MERCHANTS = 40
@@ -157,11 +157,16 @@ def find_precedents(
 
 
 def card_roster() -> list[str]:
+    """The current cohort's cards, from config/card_roster.json."""
+    era = current_era()
     lines = []
-    for card, assignment in sorted(CONFIRMED_CARDS.items()):
+    for card, assignment in CardRegistry().items():
+        if assignment.era and assignment.era != era:
+            continue
         holder = assignment.holder or "unknown holder"
+        status = "" if assignment.verified else " (unconfirmed)"
         lines.append(
-            f"  card {card} — {holder}, {committee_name(assignment.committee_id)}"
+            f"  card {card} — {holder}, {committee_name(assignment.committee_id)}{status}"
         )
     return lines
 
@@ -183,9 +188,9 @@ def build_context(
 
     parts.append("")
     parts.append(
-        "CARDS currently issued (a purchase on one is that officer's committee "
-        "by default,\nbut NOT a certainty -- cards have been lent, and meeting "
-        "food especially has been\nbought on the wrong card):"
+        "CARDS currently issued. A purchase on a confirmed card is already booked "
+        "to that\ncard's committee and is never sent to you; a card not listed "
+        "here says nothing\nabout which committee a purchase belongs to:"
     )
     parts.extend(card_roster())
 

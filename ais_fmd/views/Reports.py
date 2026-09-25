@@ -12,7 +12,6 @@ import streamlit as st
 
 from ais_fmd import auth
 from ais_fmd.data import repositories as repo
-from ais_fmd.domain import alerts as alerts_domain
 from ais_fmd.domain import report as report_domain
 from ais_fmd.domain.terms import default_semester_index, ordered_semesters
 from ais_fmd.ui import shell
@@ -47,9 +46,7 @@ tab_alerts, tab_report = st.tabs(["Alerts", "Board pack"])
 # ============================================================================
 
 with tab_alerts:
-    alerts = alerts_domain.evaluate(
-        bundle.transactions, bundle.budgets, bundle.terms, balances, semester=selected
-    )
+    alerts = repo.evaluate_alerts(semester=selected)
 
     if not alerts:
         st.success("Nothing needs attention. Budgets are within limits and the ledger reconciles.")

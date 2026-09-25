@@ -77,7 +77,8 @@ with tab_upload:
         reference = pd.DataFrame(committee_reference_rows(), columns=["ID", "Committee"])
         left, right = st.columns(2)
         midpoint = (len(reference) + 1) // 2
-        shell.dataframe(reference.iloc[:midpoint], height=340)
+        with left:
+            shell.dataframe(reference.iloc[:midpoint], height=340)
         with right:
             shell.dataframe(reference.iloc[midpoint:], height=340)
         st.caption(
@@ -141,16 +142,15 @@ with tab_upload:
                 st.success(f"Parsed {parsed.row_count:,} transactions from {file_name}.")
 
                 # --- Categorize -------------------------------------------
-                memory = repo.load_merchant_memory()
                 # Per-term rates, so a statement from a term with its own dues
                 # rate is categorized against that rate and not a stale default.
                 schedule = dues.schedule_from_terms(repo.load_terms())
-                categorized, run = categorize_frame(parsed.rows, memory, dues=schedule)
+                categorized, run = categorize_frame(parsed.rows, dues=schedule)
 
                 counts = run.counts_by_source
                 summary_columns = st.columns(4)
-                summary_columns[0].metric("From merchant memory", counts["merchant"])
-                summary_columns[1].metric("By rule", counts["rule"])
+                summary_columns[0].metric("By card or rule", counts["rule"])
+                summary_columns[1].metric("By scoring", counts["scored"])
                 summary_columns[2].metric("By model", counts["llm"])
                 summary_columns[3].metric("Need review", counts["none"])
 
@@ -424,7 +424,7 @@ with tab_terms:
                     if result.error:
                         shell.error_state("Could not save the rates", result.error)
                     elif result.unchanged:
-                        shell.notify(f"{rate_term} already had those rates.")
+                        shell.notify("info", f"{rate_term} already had those rates.")
                     else:
                         st.success(f"Saved dues rates for {rate_term}.")
                         st.rerun()

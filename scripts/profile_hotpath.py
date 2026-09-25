@@ -8,7 +8,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from ais_fmd.data.sqlite_backend import SqliteBackend
 from ais_fmd.domain import alerts, budgets, dues, quality, reconcile
-from ais_fmd.domain.categorize.merchants import MerchantMemory
 from ais_fmd.domain.categorize.pipeline import categorize_records
 from ais_fmd.domain.terms import attach_semester, default_semester, ordered_semesters
 
@@ -29,7 +28,6 @@ def main() -> int:
     terms = timed("fetch_terms", backend.fetch_terms)
     budgets_df = timed("fetch_budgets", backend.fetch_budgets)
     balances = timed("fetch_statement_balances", backend.fetch_statement_balances)
-    merchants = MerchantMemory.from_records(backend.fetch_merchants().to_dict("records"))
 
     print(f"\nrows: {len(tx):,} transactions, {len(terms)} terms\n")
     semester = default_semester(tx, terms)
@@ -55,7 +53,6 @@ def main() -> int:
         f"categorize_records (review queue, {len(pending)} rows)",
         categorize_records,
         pending.to_dict("records"),
-        merchants,
     )
 
     order = ordered_semesters(terms)

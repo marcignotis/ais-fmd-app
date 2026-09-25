@@ -47,8 +47,11 @@ stops being true, those tests fail.
 
 ## Running it
 
+First-time setup (clone, virtual environment, install) is in
+[CONTRIBUTING.md](CONTRIBUTING.md). Once installed:
+
 ```bash
-cd ais-fmd-sandbox
+# Windows: .venv\Scripts\python   macOS/Linux: .venv/bin/python
 .venv/Scripts/python -m streamlit run app.py
 ```
 
@@ -103,7 +106,7 @@ ais_fmd/
     reconcile.py           M1
     quality.py             M13
     assistant.py           M15 — tools, not a keyword router
-    categorize/            predicates, merchant memory, LLM, pipeline
+    categorize/            card roster, predicates, scoring, LLM, pipeline
     parsers/               validated Venmo and Wells Fargo parsers
   ui/                      theme, chart factories, page shell
   views/                   Streamlit pages — layout and wiring only
@@ -121,21 +124,17 @@ The original pipeline sent every transaction to GPT-4.1, then overrode most of
 the model's answers with Python rules that ran afterwards — paying for answers
 it discarded. The order is now inverted:
 
-1. **Merchant memory** — free, instant, and grows with every correction
+1. **The card roster** — a purchase on a card confirmed for the current officer
+   cohort is that card's committee (`config/card_roster.json`)
 2. **Deterministic rules** — free, exact, covers the well-understood cases
-3. **The model** — only what genuinely remains
+3. **Scoring** — weekday, merchant-type and amount evidence, gated on confidence
+4. **The model** — only what genuinely remains
 
-Measured on the seeded data, 200 transactions:
-
-| | Rows needing a model |
-| --- | --- |
-| Original design | 200 |
-| Rules first | 46 |
-| Rules + merchant memory | **25** |
-
-An 87% reduction before a single API call is made — and the Review Queue feeds
-corrections back into merchant memory, so the residual shrinks each semester
-rather than regenerating at the same size.
+Merchant memory used to sit between the rules and scoring. Treasury took it out
+on 2026-09-23: too many merchants serve more than one committee for a
+merchant's history to predict the next purchase, and it could override the
+card. On the real Fall 2026 statement the card roster plus the rules resolve
+166 of 171 rows without a model.
 
 ---
 

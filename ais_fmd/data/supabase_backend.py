@@ -6,15 +6,29 @@ from the sandbox venv, and importing this module in sandbox mode raises. It is
 included so the fixes have a production implementation to migrate to, and so the
 corrected patterns are written down somewhere concrete.
 
-FINDING F1. The original cached one Supabase client with `@st.cache_resource`,
-which caches per *process*, not per session. Every visitor shared one client
-object, `sign_in_with_password` wrote the auth session onto it, and `sign_out`
-revoked it for everybody. Any RLS policy keyed on auth.uid() was evaluated
-against whoever logged in most recently.
+FINDING F1, and what actually happened to it. The original cached one Supabase
+client with `@st.cache_resource`, which caches per *process*, not per session.
+Every visitor shared one client object, `sign_in_with_password` wrote the auth
+session onto it, and `sign_out` revoked it for everybody. Any RLS policy keyed
+on auth.uid() was evaluated against whoever logged in most recently.
 
-Here the anonymous client is still shared -- that is safe, it holds no identity
--- but any user-scoped call goes through a client carrying that session's own
-access token.
+This module used to answer that with a `_user` property that carried a
+per-session access token. **That property was never wired up** -- `get_backend()`
+constructs `SupabaseBackend()` with no token, and nothing ever passed one -- so
+it has been removed rather than left standing as a fix that was never connected.
+
+The architecture it belonged to was also abandoned deliberately, not by
+accident: the app authenticates people with Streamlit's own OIDC login and talks
+to Supabase with its own keys regardless of who is using it, so no individual
+ever opens a Postgres session and `auth.uid()` is always NULL. See the long note
+on `profiles` in migrations/002_deferred_features.sql. Authorization is
+application-level, in `auth.require(...)`, on every page.
+
+What that leaves is worth stating plainly rather than implying otherwise: reads
+go through the anon key and writes through the service key, so the database
+grants no protection of its own. Enabling RLS with no permissive policy -- so
+the service key, which bypasses RLS by design, is the only way in -- is the
+control that would, and it is not applied yet.
 """
 
 from __future__ import annotations
@@ -51,7 +65,7 @@ def _now() -> str:
 class SupabaseBackend(Backend):
     name = "supabase"
 
-    def __init__(self, access_token: str | None = None) -> None:
+    def __init__(self) -> None:
         _require_production()
         try:
             from supabase import create_client
@@ -61,40 +75,66 @@ class SupabaseBackend(Backend):
                 "it on purpose; install it only in a production environment."
             ) from exc
 
-        import os
-
-        url = os.environ["SUPABASE_URL"]
         self._create_client = create_client
-        self._url = url
-        self._anon_key = os.environ["SUPABASE_ANON_KEY"]
-        self._service_key = os.environ.get("SUPABASE_SERVICE_KEY", "")
-        self._access_token = access_token
+
+        # Accepts either shape, because both are documented somewhere and the
+        # two used to disagree. `os.environ` works on a host where you can set
+        # real environment variables; a `[supabase]` section in secrets.toml is
+        # the only channel Streamlit Community Cloud offers -- and Streamlit
+        # never copies a *section* into os.environ, only top-level scalars, so
+        # the previous `os.environ["SUPABASE_URL"]` could not be satisfied by
+        # the secrets file the project's own example told people to write.
+        #
+        # New-format key names (publishable/secret) are preferred and the legacy
+        # anon/service_role names still work, so this reads whichever is present.
+        section = settings.secret_section("supabase")
+
+        def _config(*names: str, required: bool = False) -> str:
+            for name in names:
+                value = settings._setting(name) or str(section.get(name, "") or "")
+                if value.strip():
+                    return value.strip()
+            if required:
+                raise RuntimeError(
+                    f"Supabase is not configured: set one of {', '.join(names)} "
+                    f"as an environment variable or under [supabase] in "
+                    f".streamlit/secrets.toml."
+                )
+            return ""
+
+        self._url = _config("SUPABASE_URL", "url", required=True)
+        self._anon_key = _config(
+            "SUPABASE_ANON_KEY", "publishable_key", "anon_key", "key", required=True
+        )
+        self._service_key = _config(
+            "SUPABASE_SERVICE_KEY", "secret_key", "service_key"
+        )
+        self._anon_client = None
+        self._admin_client = None
 
     # --- clients -------------------------------------------------------------
+    #
+    # Built once per backend instance and reused. These were previously bare
+    # `@property` methods calling `create_client()` on *every* access, so a page
+    # doing ten reads opened ten HTTP clients and ten TLS handshakes. The
+    # backend object itself is cached per process by `repositories.backend()`,
+    # which is safe precisely because it holds no user identity.
 
     @property
     def _anon(self):
         """Identity-free client. Safe to share; holds no session."""
-        return self._create_client(self._url, self._anon_key)
-
-    @property
-    def _user(self):
-        """
-        Client carrying *this session's* token.
-
-        This is the F1 fix: identity travels with the request rather than being
-        written onto a process-global object.
-        """
-        client = self._create_client(self._url, self._anon_key)
-        if self._access_token:
-            client.postgrest.auth(self._access_token)
-        return client
+        if self._anon_client is None:
+            self._anon_client = self._create_client(self._url, self._anon_key)
+        return self._anon_client
 
     @property
     def _admin(self):
+        """Service-key client. Bypasses RLS -- server-side only, never exposed."""
         if not self._service_key:
             raise RuntimeError("SUPABASE_SERVICE_KEY is not configured.")
-        return self._create_client(self._url, self._service_key)
+        if self._admin_client is None:
+            self._admin_client = self._create_client(self._url, self._service_key)
+        return self._admin_client
 
     # --- reads ---------------------------------------------------------------
 
@@ -504,6 +544,7 @@ class SupabaseBackend(Backend):
                     "model_committee": example.get("model_committee"),
                     "model_confidence": example.get("model_confidence"),
                     "model_source": example.get("model_source"),
+                    "sample_weight": example.get("sample_weight"),
                     "labeled_by": example.get("labeled_by", actor),
                     "natural_key": example.get("natural_key"),
                 }
@@ -681,7 +722,16 @@ class SupabaseBackend(Backend):
     def update_transactions(
         self, changes: list[TransactionChange], actor: str
     ) -> UpdateResult:
-        """FINDING F6. One batched RPC rather than one HTTP request per row."""
+        """
+        FINDING F6. One batched RPC rather than one HTTP request per row.
+
+        M10. `blocked` / `blocked_terms` come from migration 003, which taught
+        the RPC to honour a closed term -- until then locking was enforced only
+        in `sqlite_backend`, so closing a term did nothing in production while
+        the Treasury page said otherwise. `.get(..., 0)` rather than `[...]` so
+        a database still on the two-column version of the function degrades to
+        the old behaviour instead of raising.
+        """
         result = UpdateResult()
         if not changes:
             return result
@@ -700,6 +750,14 @@ class SupabaseBackend(Backend):
             data = (response.data or [{}])[0]
             result.updated = int(data.get("updated", 0))
             result.unchanged = int(data.get("unchanged", 0))
+
+            blocked = int(data.get("blocked", 0) or 0)
+            if blocked:
+                terms = str(data.get("blocked_terms") or "a closed term")
+                result.error = (
+                    f"{blocked} transaction(s) fall in {terms}, which is closed. "
+                    f"Reopen the term before editing them."
+                )
         except Exception as exc:  # noqa: BLE001
             result.error = f"{type(exc).__name__}: {exc}"
         return result

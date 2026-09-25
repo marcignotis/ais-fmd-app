@@ -26,6 +26,21 @@ this module samples. The sample is:
     matters more than a misbooked $6 coffee, and a reviewer with limited time
     should spend it where the money is.
 
+WHY EVERY ROW CARRIES A WEIGHT. Both design choices above make the sample
+deliberately unrepresentative: a rare committee is over-sampled by its floor of
+one, and the largest rows are picked on purpose rather than at random. So the
+raw share of checked rows the model got right is *not* its accuracy -- it is
+tilted toward rare strata and large amounts. Each sampled row therefore records
+how many rows of the population it stands for (`sample_weight`), and
+`agreement` reports the weighted estimate alongside the raw one:
+
+  * a largest-first pick stands for itself (weight 1): it is a certainty
+    stratum of its own, chosen on purpose, not a draw;
+  * a random pick stands for its share of the rest of its stratum:
+    (stratum size - largest picks) / (random picks);
+  * every stratum keeps at least one *random* pick whenever it has rows left
+    over, so no part of the population goes unrepresented.
+
 What this module does NOT do is decide anything. It selects rows and records
 what the model said about each; a human supplies the verdict.
 """
@@ -33,7 +48,8 @@ what the model said about each; a human supplies the verdict.
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass, field
+import math
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 
 from ...config.categories import committee_label
@@ -56,6 +72,11 @@ class SpotCheckRow:
     confidence: float
     source: str
     amount: Decimal | None
+    # How many rows of the population this row stands for, and how it was
+    # chosen: "largest" (on purpose, weight 1), "random", or "census" (the
+    # whole stratum was taken). None on a row rebuilt without its sample.
+    weight: float | None = None
+    pick: str = ""
 
     @property
     def stratum(self) -> tuple[str, int]:
@@ -167,16 +188,26 @@ def build_sample(
         if quota <= 0:
             continue
         pool = buckets[key]
+        if quota >= len(pool):
+            # The whole stratum: every row stands for itself.
+            chosen.extend(replace(r, weight=1.0, pick="census") for r in pool)
+            continue
+
         by_amount = sorted(
             pool, key=lambda r: (-(abs(r.amount) if r.amount is not None else Decimal(0)), r.index)
         )
-        take_big = min(largest_first, quota, len(by_amount))
-        picked = by_amount[:take_big]
+        # Leave room for at least one random pick. Without it a stratum whose
+        # quota is 1 would be represented only by its largest row, which says
+        # nothing about the rest of it.
+        take_big = max(0, min(largest_first, quota - 1, len(by_amount)))
+        picked = [replace(r, weight=1.0, pick="largest") for r in by_amount[:take_big]]
         picked_indexes = {r.index for r in picked}
 
         remainder = [r for r in pool if r.index not in picked_indexes]
         remainder.sort(key=lambda r: _stable_rank(r.record, r.index, seed))
-        picked.extend(remainder[: quota - take_big])
+        drawn = quota - take_big
+        weight = len(remainder) / drawn
+        picked.extend(replace(r, weight=weight, pick="random") for r in remainder[:drawn])
         chosen.extend(picked)
 
     chosen.sort(key=lambda r: (r.source, r.committee_id, -(abs(r.amount) if r.amount else Decimal(0))))
@@ -295,6 +326,7 @@ def to_label(row: SpotCheckRow, committee_id: int, actor: str, era: str) -> dict
         "model_committee": int(row.committee_id),
         "model_confidence": float(row.confidence),
         "model_source": row.source,
+        "sample_weight": float(row.weight) if row.weight is not None else None,
         "labeled_by": actor,
     }
 
@@ -303,29 +335,96 @@ def agreement(labels: list[dict]) -> dict:
     """
     How often the human agreed with the machine, over spot-check labels.
 
-    This is the number the project does not currently have: accuracy on the rows
-    the categorizer was confident enough to book without asking.
+    This is the number the project does not otherwise have: accuracy on the
+    rows the categorizer was confident enough to book without asking.
+
+    Two figures, because only one of them is an estimate of accuracy:
+
+      * `rate` -- the raw share of checked rows the model got right. Easy to
+        read, but tilted by the sample design (see the module docstring).
+      * `weighted_rate` -- each row counted for the rows it stands for. This is
+        the estimate of accuracy across *all* auto-applied rows. `margin` is its
+        95% half-width, using the Kish effective sample size -- the standard
+        allowance for unequal weights. `dollar_weighted_rate` is the same thing
+        weighted by amount: the share of auto-booked *money* that landed on the
+        right committee.
+
+    Labels recorded before weights existed have no `sample_weight` and count
+    towards the raw figures only.
     """
     checked = [
         label for label in labels
         if label.get("source") == SPOT_CHECK_SOURCE and label.get("model_committee") is not None
     ]
     if not checked:
-        return {"checked": 0, "agreed": 0, "rate": 0.0, "by_source": {}}
+        return {
+            "checked": 0, "agreed": 0, "rate": 0.0, "by_source": {},
+            "weighted_checked": 0, "weighted_rate": None, "margin": None,
+            "effective_n": 0.0, "dollar_weighted_rate": None,
+        }
 
-    by_source: dict[str, dict[str, int]] = {}
+    by_source: dict[str, dict] = {}
     agreed = 0
+    total_w = agreed_w = total_w2 = 0.0
+    dollars = agreed_dollars = 0.0
+    weighted_checked = 0
     for label in checked:
         source = str(label.get("model_source") or "unknown")
-        entry = by_source.setdefault(source, {"checked": 0, "agreed": 0})
+        entry = by_source.setdefault(
+            source, {"checked": 0, "agreed": 0, "weight": 0.0, "agreed_weight": 0.0}
+        )
         entry["checked"] += 1
-        if int(label["model_committee"]) == int(label["committee_id"]):
+        right = int(label["model_committee"]) == int(label["committee_id"])
+        if right:
             entry["agreed"] += 1
             agreed += 1
+
+        weight = _weight(label.get("sample_weight"))
+        if weight is None:
+            continue
+        weighted_checked += 1
+        entry["weight"] += weight
+        total_w += weight
+        total_w2 += weight * weight
+        amount = abs(_number(label.get("amount")) or 0.0)
+        dollars += weight * amount
+        if right:
+            entry["agreed_weight"] += weight
+            agreed_w += weight
+            agreed_dollars += weight * amount
+
+    for entry in by_source.values():
+        entry["weighted_rate"] = (
+            entry["agreed_weight"] / entry["weight"] if entry["weight"] else None
+        )
+
+    weighted_rate = agreed_w / total_w if total_w else None
+    effective_n = (total_w * total_w / total_w2) if total_w2 else 0.0
+    margin = None
+    if weighted_rate is not None and effective_n > 0:
+        margin = 1.96 * math.sqrt(weighted_rate * (1 - weighted_rate) / effective_n)
 
     return {
         "checked": len(checked),
         "agreed": agreed,
         "rate": agreed / len(checked),
         "by_source": by_source,
+        "weighted_checked": weighted_checked,
+        "weighted_rate": weighted_rate,
+        "margin": margin,
+        "effective_n": effective_n,
+        "dollar_weighted_rate": (agreed_dollars / dollars) if dollars else None,
     }
+
+
+def _number(value: object) -> float | None:
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return None if math.isnan(number) else number
+
+
+def _weight(value: object) -> float | None:
+    number = _number(value)
+    return number if number is not None and number > 0 else None

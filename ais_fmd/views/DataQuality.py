@@ -24,7 +24,7 @@ shell.page_header(
 )
 
 bundle = repo.load_bundle()
-issues = quality.run_all_checks(bundle.transactions, bundle.budgets, bundle.terms)
+issues = repo.run_quality_checks()
 
 if not issues:
     st.success("Every check passes. Nothing to report.")

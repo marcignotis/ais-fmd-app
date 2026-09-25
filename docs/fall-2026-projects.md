@@ -1,6 +1,6 @@
 # Fall 2026 projects
 
-Seven projects for pairs. The first three are the semester's core features and
+Eight projects for pairs and trios. The first three are the semester's core features and
 get staffed first; the rest are ordered by how much they matter to treasury.
 If there are fewer pairs than projects, drop from the bottom.
 
@@ -20,6 +20,7 @@ other skill (design, finance, SQL, treasury knowledge).
 | `close` | Semester close & board pack | — | Accounting + design |
 | `qa` | Write-path tests & bug bash | — | Detail-oriented, testing |
 | `ux` | Usability, docs & treasury research | — | Writing, research, treasury ops (no coding required) |
+| `ai` | AI assistant | — | Python + LLM APIs |
 
 ## Milestones (all teams)
 
@@ -27,16 +28,16 @@ Dates are proposals — adjust to the UF calendar.
 
 | By | Milestone | Proof |
 | --- | --- | --- |
-| Sun Sep 20 | Everyone set up; each pair opens a draft PR adding `docs/projects/<code>/plan.md` | App runs locally; plan PR open |
-| Sun Oct 4 | First working slice demoed in the sandbox | 2-minute demo at team meeting |
-| Sun Oct 25 | Feature complete in the sandbox, PRs open | CI green, partner-reviewed |
+| Sun Oct 4 | Everyone set up; each team fills in its goals worksheet | App runs locally; worksheet filled in |
+| Sun Oct 11 | First working slice demoed in the sandbox | 2-minute demo at team meeting |
+| Sun Nov 1 | Feature complete in the sandbox, PRs open | CI green, partner-reviewed |
 | Sun Nov 15 | Merged; integration bug bash across all teams | Merged to `sandbox/mvp-rebuild` |
 | Sat Nov 21 | **Code freeze** before Thanksgiving break | Only fixes after this |
 | Sun Dec 6 | Final demo and handoff notes for the Spring treasurer | `docs/projects/<code>/handoff.md` |
 
-`plan.md` answers four questions in under a page: what "done" looks like, the
-first slice you will demo, which files you expect to touch, and who does which
-piece.
+The goals worksheet is a shared document the treasurer sends each team (not a
+PR, and it stays out of this public repo). Each team writes its end-state goals
+and how each one will be measured. Code PRs start after that.
 
 ---
 
@@ -274,3 +275,24 @@ codebase gradually.
 
 **Done means.** Usability findings filed; Runbook updated; a written
 recommendation for each open question.
+
+---
+
+## `ai` — AI assistant
+
+**Goal.** Anyone can ask a plain-English question about the finances and get a
+correct answer from the live data, or be told where in the app to look.
+
+**What already exists.** `views/Assistant.py` + `domain/assistant.py` answer
+questions offline by running named, tested tools over the data, so every number
+is checkable.
+
+**Build.** Put a language model in front of those tools: it picks the tool and
+its arguments, the tool computes the answer. Add tools for gaps rather than
+letting the model write SQL; if free-form SQL is ever added, it is read-only,
+runs on a copy, and shows the query. Choose the model by scoring candidates on a
+fixed set of test questions (accuracy, speed, cost).
+
+**Done means.** A test-question set with a measured pass rate; the assistant
+never states a number no tool produced; a VP only ever gets their committee's
+figures. The sandbox cannot call a model, so tests use a stub.

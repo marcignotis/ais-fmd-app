@@ -135,16 +135,14 @@ sponsorship_summary = sponsorship_domain.summarize(
 if sponsorship_summary.goal is None:
     shell.say(
         f"Sponsorship raised this term: **${sponsorship_summary.raised:,.2f}** "
-        f"({sponsorship_summary.payment_count} payment(s)) — no goal set. "
-        f"Set one on the Treasury page (Terms tab).",
+        f"— no goal set. Set one on the Treasury page (Terms tab).",
         caption=True,
     )
 else:
     shell.say(
-        f"🎯 Sponsorship: **${sponsorship_summary.raised:,.2f}** of "
+        f"Sponsorship: **${sponsorship_summary.raised:,.2f}** of "
         f"${sponsorship_summary.goal:,.2f} goal — "
-        f"**{sponsorship_summary.percent_of_goal:.0f}%** "
-        f"({sponsorship_summary.payment_count} payment(s))",
+        f"**{sponsorship_summary.percent_of_goal:.0f}%**",
         caption=True,
     )
     st.progress(min(sponsorship_summary.percent_of_goal / 100, 1.0))

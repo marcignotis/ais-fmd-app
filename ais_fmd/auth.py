@@ -66,6 +66,18 @@ class Identity:
     def can(self, required: Role) -> bool:
         return self.role >= required
 
+    @property
+    def committee_scoped(self) -> bool:
+        """
+        True for a VP: an Officer who is not also a Treasurer or Admin.
+
+        A scoped identity gets its own short navigation (`nav.VP_PAGES`) instead
+        of the full one, because most pages are open to any role at or above
+        MEMBER and show every committee's data -- ranking an Officer above
+        MEMBER would otherwise hand a VP the whole ledger.
+        """
+        return self.role == Role.OFFICER
+
 
 def _default_identity() -> Identity:
     return Identity(email="treasurer@sandbox.local", role=Role.TREASURER)
@@ -352,8 +364,25 @@ def role_switcher() -> None:
         key="ais_role_picker",
         help="Sandbox only. In production this comes from the authenticated session.",
     )
-    if chosen != identity.role:
-        set_identity(Identity(email=identity.email, role=chosen, committee_id=identity.committee_id))
+    # A VP always belongs to a committee, so testing as one needs a committee
+    # to be chosen too. Without this an Officer would have committee_id None.
+    committee_id = identity.committee_id
+    if chosen == Role.OFFICER:
+        from .config.categories import BUDGETED_COMMITTEE_IDS, committee_name
+
+        options_ids = list(BUDGETED_COMMITTEE_IDS)
+        current = committee_id if committee_id in options_ids else options_ids[0]
+        committee_id = st.sidebar.selectbox(
+            "Committee",
+            options_ids,
+            index=options_ids.index(current),
+            format_func=committee_name,
+            key="ais_committee_picker",
+            help="Sandbox only. In production this comes from the VP's profile.",
+        )
+
+    if chosen != identity.role or committee_id != identity.committee_id:
+        set_identity(Identity(email=identity.email, role=chosen, committee_id=committee_id))
         st.rerun()
 
     st.sidebar.caption(ROLE_DESCRIPTIONS[chosen])

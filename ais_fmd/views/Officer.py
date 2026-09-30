@@ -44,7 +44,17 @@ if not semesters:
 # In production the committee comes from the signed-in profile. A treasurer or
 # admin can look at any committee; an officer sees only their own.
 
-can_choose = identity.can(auth.Role.TREASURER) or identity.committee_id is None
+can_choose = identity.can(auth.Role.TREASURER)
+
+# An officer whose profile has no committee sees nothing rather than a picker:
+# a picker would let them open any committee, which is the one thing this page
+# exists to prevent.
+if not can_choose and identity.committee_id is None:
+    shell.empty_state(
+        "No committee assigned to your account",
+        " Ask the treasurer to add your email under Officer Access.",
+    )
+    st.stop()
 
 controls = st.columns([2, 2])
 with controls[0]:

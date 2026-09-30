@@ -88,8 +88,20 @@ with col_right:
 st.markdown("")
 st.markdown("#### Where things are")
 
-st.markdown(
-    """
+if identity.committee_scoped:
+    # A VP's navigation has only these pages; listing the others would point
+    # them at pages they cannot open.
+    st.markdown(
+        """
+| Page | What it is for |
+| --- | --- |
+| **My Committee** | Your budget, spending and reimbursements |
+| **My Transactions** | Every charge and deposit booked to your committee |
+"""
+    )
+else:
+    st.markdown(
+        """
 | Page | What it is for |
 | --- | --- |
 | **Dashboard** | Budget against actual, spending trends, income and expense breakdown |
@@ -101,7 +113,7 @@ st.markdown(
 | **Audit Log** | Who changed what, and when |
 | **Assistant** | Ask questions about the data in plain language |
 """
-)
+    )
 
 if identity.role < auth.Role.TREASURER:
     st.caption(

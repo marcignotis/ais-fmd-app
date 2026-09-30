@@ -255,7 +255,7 @@ def membership_db(seeded_db, use_db):
             row[0]
             for row in connection.execute(
                 "SELECT transactionid FROM transactions WHERE budget_category = 8 "
-                "ORDER BY transactionid LIMIT 6"
+                "ORDER BY transaction_date DESC, transactionid LIMIT 6"
             )
         ]
         connection.executemany(
@@ -312,3 +312,96 @@ def test_a_passport_profile_gets_the_same_page_as_a_membership_profile(membershi
     as_membership = run_as(VIEWS / "MyTransactions.py", OFFICER, 5, mytxn_semester="All")
     as_passport = run_as(VIEWS / "MyTransactions.py", OFFICER, 16, mytxn_semester="All")
     assert as_membership.dataframe[0].value.equals(as_passport.dataframe[0].value)
+
+
+# --- The dashboard maths -------------------------------------------------------
+
+
+def test_budget_flow_steps_add_up_to_the_remaining_balance():
+    split = pd.DataFrame(
+        {"Category": list("ABCDEFG"), "Amount": [70.0, 60.0, 50.0, 40.0, 30.0, 20.0, 10.0]}
+    )
+    labels, values, measures = vp_metrics.budget_flow(split, 1000.0)
+    assert labels == ["Budget", "A", "B", "C", "D", "E", "Other", "Remaining"]
+    assert values[labels.index("Other")] == pytest.approx(-30.0)  # F + G
+    assert sum(values[:-1]) == pytest.approx(1000.0 - 280.0)  # what really remains
+    assert measures[-1] == "total"
+    assert set(measures[:-1]) == {"relative"}
+
+
+def test_budget_flow_has_no_other_step_when_everything_is_itemised():
+    split = pd.DataFrame({"Category": ["A", "B"], "Amount": [30.0, 20.0]})
+    labels, values, _ = vp_metrics.budget_flow(split, 100.0)
+    assert labels == ["Budget", "A", "B", "Remaining"]
+    assert sum(values[:-1]) == pytest.approx(50.0)
+
+
+def test_budget_flow_ends_below_zero_when_over_budget():
+    split = pd.DataFrame({"Category": ["A"], "Amount": [150.0]})
+    _, values, _ = vp_metrics.budget_flow(split, 100.0)
+    assert sum(values[:-1]) == pytest.approx(-50.0)
+
+
+def test_historical_adds_the_lines_per_semester_and_ignores_other_committees():
+    terms = pd.DataFrame(
+        {
+            "TermID": ["T1", "T2"],
+            "Semester": ["Fall 2025", "Spring 2026"],
+            "start_date": ["2025-08-01", "2026-01-05"],
+            "end_date": ["2025-12-15", "2026-05-01"],
+        }
+    )
+    budgets = pd.DataFrame(
+        {
+            "termid": ["T1", "T1", "T2", "T2"],
+            "committeeid": [5, 16, 5, 16],
+            "budget_amount": [100.0, 50.0, 200.0, 25.0],
+        }
+    )
+    transactions = pd.DataFrame(
+        {
+            "transaction_date": pd.to_datetime(
+                ["2025-09-01", "2025-10-01", "2026-02-01", "2026-02-02"]
+            ),
+            "amount": [-30.0, -20.0, -75.0, -999.0],
+            "budget_category": pd.array([5, 16, 5, 9], dtype="Int64"),  # 9 = Marketing
+        }
+    )
+    out = vp_metrics.historical(transactions, budgets, terms, ["Membership", "Passport"])
+    assert out["Semester"].tolist() == ["Fall 2025", "Spring 2026"]
+    assert out["Budget"].tolist() == [150.0, 225.0]
+    assert out["Spent"].tolist() == [50.0, 75.0]  # Marketing's 999 is not counted
+    assert out["% Spent"].tolist() == pytest.approx([50 / 150 * 100, 75 / 225 * 100])
+
+
+def test_historical_with_nothing_to_show_is_an_empty_frame_with_the_right_columns():
+    out = vp_metrics.historical(pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), ["Passport"])
+    assert list(out.columns) == ["Semester", "Budget", "Spent", "% Spent"]
+    assert out.empty
+
+
+# --- The dashboard page --------------------------------------------------------
+
+
+@pytest.mark.parametrize("committee_id", BUDGETED_COMMITTEE_IDS)
+def test_my_committee_renders_for_every_committee(committee_id, seeded_db, use_db):
+    use_db(seeded_db)
+    app = run_as(VIEWS / "Officer.py", OFFICER, committee_id)
+    assert_clean(app, f"My Committee as the {committee_name(committee_id)} VP")
+
+
+def test_recent_charges_show_only_the_committees_own_lines(membership_db):
+    app = run_as(VIEWS / "Officer.py", OFFICER, 5)
+    assert_clean(app, "My Committee as the Membership VP")
+    recent = next(
+        (element.value for element in app.dataframe if {"Date", "Line"} <= set(element.value.columns)),
+        None,
+    )
+    assert recent is not None, "a two-line committee with charges should list them"
+    assert set(recent["Line"]) <= {"Membership", "Passport"}
+    owned = {(row[0], row[1]) for row in _committee_rows(5)}
+    shown = {
+        (str(pd.Timestamp(date).date()), round(float(amount), 2))
+        for date, amount in zip(recent["Date"], recent["Amount"])
+    }
+    assert shown <= owned, "a charge from outside the committee's lines was listed"

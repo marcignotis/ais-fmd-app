@@ -15,6 +15,7 @@ import pandas as pd
 import streamlit as st
 
 from ais_fmd import auth
+from ais_fmd.config import vp_committees
 from ais_fmd.config.categories import committee_name
 from ais_fmd.data import repositories as repo
 from ais_fmd.domain.terms import attach_semester, default_semester_index, ordered_semesters
@@ -35,7 +36,7 @@ if committee_id is None:
 
 shell.page_header(
     "My Transactions",
-    f"Every charge and deposit booked to {committee_name(committee_id)}.",
+    f"Every charge and deposit booked to {vp_committees.title_for(committee_id)}.",
 )
 
 bundle = repo.load_bundle()
@@ -45,8 +46,11 @@ if bundle.transactions.empty:
 
 # --- Scope: this committee only, before any filter is applied ----------------
 
+# A committee can own several budget lines (Membership owns Membership and
+# Passport); all of them are "mine". Anything outside them is never selected.
+line_ids = vp_committees.budget_ids_for(committee_id)
 tagged = attach_semester(bundle.transactions, bundle.terms)
-mine = tagged[tagged["budget_category"].eq(committee_id).fillna(False)]
+mine = tagged[tagged["budget_category"].isin(line_ids)]
 
 # --- Filters -----------------------------------------------------------------
 
@@ -64,7 +68,18 @@ with filter_columns[1]:
 with filter_columns[2]:
     search = st.text_input("Search details", placeholder="merchant, note…", key="mytxn_search")
 
+line_choice = "All"
+if len(line_ids) > 1:
+    line_choice = st.selectbox(
+        "Budget line",
+        ["All"] + [committee_name(cid) for cid in line_ids],
+        key="mytxn_line",
+    )
+
 view = mine
+if line_choice != "All":
+    line_id = next(cid for cid in line_ids if committee_name(cid) == line_choice)
+    view = view[view["budget_category"] == line_id]
 if semester_choice != "All":
     view = view[view["Semester"] == semester_choice]
 if type_choice == "Income":
@@ -93,15 +108,19 @@ if view.empty:
     shell.empty_state("Nothing matches these filters", " Try widening the search.")
     st.stop()
 
+table = pd.DataFrame(
+    {
+        "Date": pd.to_datetime(view["transaction_date"]).dt.date,
+        "Amount": view["amount"],
+        "Purpose": view["purpose"].fillna("—"),
+        "Details": view["details"].fillna("").astype(str),
+    }
+)
+if len(line_ids) > 1:
+    table.insert(1, "Line", view["budget_category"].map(committee_name))
+
 shell.dataframe(
-    pd.DataFrame(
-        {
-            "Date": pd.to_datetime(view["transaction_date"]).dt.date,
-            "Amount": view["amount"],
-            "Purpose": view["purpose"].fillna("—"),
-            "Details": view["details"].fillna("").astype(str),
-        }
-    ),
+    table,
     column_config={"Amount": st.column_config.NumberColumn(format="$%.2f")},
     height=520,
 )

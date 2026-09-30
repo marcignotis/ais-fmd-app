@@ -16,11 +16,13 @@ import pandas as pd
 import streamlit as st
 
 from ais_fmd import auth
+from ais_fmd.config import vp_committees
 from ais_fmd.config.categories import BUDGETED_COMMITTEE_IDS, committee_name
 from ais_fmd.data import repositories as repo
 from ais_fmd.domain import budgets as budget_domain
 from ais_fmd.domain import reimbursements as reimb
-from ais_fmd.domain.money import format_currency, safe_percent
+from ais_fmd.domain import vp_metrics
+from ais_fmd.domain.money import format_currency
 from ais_fmd.domain.terms import attach_semester, default_semester_index, ordered_semesters
 from ais_fmd.ui import charts, shell, theme
 
@@ -65,14 +67,20 @@ with controls[0]:
             if identity.committee_id in BUDGETED_COMMITTEE_IDS
             else 0
         )
-        chosen_name = st.selectbox("Committee", committee_names, index=default_index)
+        picked_name = st.selectbox("Committee", committee_names, index=default_index)
         committee_id = next(
-            cid for cid in BUDGETED_COMMITTEE_IDS if committee_name(cid) == chosen_name
+            cid for cid in BUDGETED_COMMITTEE_IDS if committee_name(cid) == picked_name
         )
     else:
         committee_id = identity.committee_id
-        chosen_name = committee_name(committee_id)
-        st.markdown(f"**Committee**  \n{chosen_name}")
+        st.markdown(f"**Committee**  \n{vp_committees.title_for(committee_id)}")
+
+# A committee can own several budget lines (Membership owns Membership and
+# Passport). Everything below is about all of them together; an unmapped
+# committee is just its own single line, exactly as before.
+line_ids = vp_committees.budget_ids_for(committee_id)
+line_names = [committee_name(cid) for cid in line_ids]
+chosen_name = vp_committees.title_for(committee_id)
 
 with controls[1]:
     semester = st.selectbox(
@@ -92,38 +100,72 @@ if not can_choose:
 summary = budget_domain.budget_vs_actual(
     bundle.transactions, bundle.budgets, bundle.terms, semester
 )
-row = summary[summary["Committee_Name"] == chosen_name]
+lines = summary[summary["Committee_Name"].isin(line_names)]
 
-if row.empty:
+if lines.empty:
     shell.empty_state(
         f"No budget or spending recorded for {chosen_name} in {semester}",
         "Ask the treasurer to set an allocation for this term.",
     )
     st.stop()
 
-position = row.iloc[0]
-percent = safe_percent(position["Spent"], position["Budget"])
+position = vp_metrics.rollup(summary, line_names)
+percent = position["percent"]
+status = vp_metrics.status_for(percent, position["spent"])
 
 metrics = st.columns(4)
-metrics[0].metric("Budget", format_currency(position["Budget"]))
-metrics[1].metric("Spent", format_currency(position["Spent"]))
-metrics[2].metric("Remaining", format_currency(position["Remaining"]))
+metrics[0].metric("Budget", format_currency(position["budget"]))
+metrics[1].metric("Spent", format_currency(position["spent"]))
+metrics[2].metric("Remaining", format_currency(position["remaining"]))
 metrics[3].metric("Used", "—" if percent is None else f"{percent:.0f}%")
 
 status_style = {"over": "over", "approaching": "approaching", "on track": "on track"}
 st.markdown(
-    shell.pill(position["Status"], status_style.get(position["Status"], "muted")),
+    shell.pill(status, status_style.get(status, "muted")),
     unsafe_allow_html=True,
 )
 if percent is not None:
     st.progress(min(percent / 100, 1.0))
 
-if position["Status"] == "over":
+# Pace: money used against the share of the term that has passed. Spending 60%
+# of a budget means something different in week 3 than in week 12.
+elapsed = vp_metrics.term_elapsed_percent(bundle.terms, semester)
+if elapsed is not None and percent is not None:
+    pace = f"{percent:.0f}% of the budget is spent and {elapsed:.0f}% of {semester} has passed."
+    projected = vp_metrics.projected_spend(position["spent"], elapsed)
+    if projected is not None:
+        gap = position["budget"] - projected
+        pace += (
+            f" At this pace the term ends with {format_currency(projected)} spent, "
+            + (
+                f"{format_currency(gap)} under budget."
+                if gap >= 0
+                else f"{format_currency(-gap)} over budget."
+            )
+        )
+    shell.say(pace, caption=True)
+
+if status == "over":
     shell.notify(
         "warning",
         f"{chosen_name} is over its allocation by "
-        f"{format_currency(abs(position['Remaining']))}. Speak to the treasurer "
+        f"{format_currency(abs(position['remaining']))}. Speak to the treasurer "
         f"before committing anything further.",
+    )
+
+if len(line_names) > 1:
+    st.markdown("#### By budget line")
+    by_line = lines.rename(columns={"Committee_Name": "Budget line"})
+    by_line["% Spent"] = by_line["% Spent"].map(
+        lambda value: "—" if value is None or value != value else f"{value:.1f}%"
+    )
+    shell.dataframe(
+        by_line[["Budget line", "Budget", "Spent", "Remaining", "% Spent", "Status"]],
+        column_config={
+            "Budget": st.column_config.NumberColumn(format="$%.2f"),
+            "Spent": st.column_config.NumberColumn(format="$%.2f"),
+            "Remaining": st.column_config.NumberColumn(format="$%.2f"),
+        },
     )
 
 # --- Spending ----------------------------------------------------------------
@@ -132,7 +174,7 @@ st.markdown('<hr class="ais-rule" />', unsafe_allow_html=True)
 st.markdown("#### Your spending this term")
 
 scoped = attach_semester(bundle.transactions, bundle.terms)
-scoped = scoped[(scoped["Semester"] == semester) & (scoped["budget_category"] == committee_id)]
+scoped = scoped[(scoped["Semester"] == semester) & scoped["budget_category"].isin(line_ids)]
 
 if scoped.empty:
     shell.empty_state("Nothing recorded against this committee yet")
@@ -140,15 +182,18 @@ else:
     table_column, chart_column = st.columns([3, 2])
     with table_column:
         display = scoped.sort_values("transaction_date", ascending=False)
+        table = pd.DataFrame(
+            {
+                "Date": pd.to_datetime(display["transaction_date"]).dt.date,
+                "Amount": display["amount"],
+                "Purpose": display["purpose"].fillna("—"),
+                "Details": display["details"].astype(str).str.slice(0, 70),
+            }
+        )
+        if len(line_ids) > 1:
+            table.insert(1, "Line", display["budget_category"].map(committee_name))
         shell.dataframe(
-            pd.DataFrame(
-                {
-                    "Date": pd.to_datetime(display["transaction_date"]).dt.date,
-                    "Amount": display["amount"],
-                    "Purpose": display["purpose"].fillna("—"),
-                    "Details": display["details"].astype(str).str.slice(0, 70),
-                }
-            ),
+            table,
             column_config={"Amount": st.column_config.NumberColumn(format="$%.2f")},
             height=360,
         )
@@ -200,7 +245,7 @@ if requests.empty:
         "Submit one from the Reimbursements page — it will be pre-assigned to this committee.",
     )
 else:
-    mine = requests[requests["committee_id"] == committee_id]
+    mine = requests[requests["committee_id"].isin(line_ids)]
     if mine.empty:
         shell.empty_state("No requests for this committee yet")
     else:

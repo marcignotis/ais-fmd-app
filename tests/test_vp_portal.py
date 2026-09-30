@@ -14,7 +14,10 @@ import pytest
 from streamlit.testing.v1 import AppTest
 
 from ais_fmd import auth, nav
+from ais_fmd.config import vp_committees
 from ais_fmd.config.categories import BUDGETED_COMMITTEE_IDS, committee_name
+from ais_fmd.domain import budgets as budget_domain
+from ais_fmd.domain import vp_metrics
 
 # Fixtures and helpers shared with the other headless view tests.
 from tests.test_views import ROOT, TIMEOUT, VIEWS, assert_clean, seeded_db, use_db  # noqa: F401
@@ -74,11 +77,12 @@ def test_every_vp_page_exists_and_is_gated(path):
 
 
 def _committee_rows(committee_id: int) -> list[tuple]:
-    """What the database holds for one committee, in a comparable shape."""
+    """What the database holds for everything a VP with this profile owns."""
     from ais_fmd.data.sqlite_backend import SqliteBackend
 
     frame = SqliteBackend().fetch_transactions()
-    rows = frame[frame["budget_category"].eq(committee_id).fillna(False)]
+    owned = vp_committees.budget_ids_for(committee_id)
+    rows = frame[frame["budget_category"].isin(owned)]
     return sorted(
         (
             str(pd.Timestamp(date).date()),
@@ -145,3 +149,166 @@ def test_home_points_a_vp_only_at_pages_they_have(seeded_db, use_db):
     text = " ".join(block.value for block in app.markdown)
     assert "My Transactions" in text
     assert "Review Queue" not in text
+
+
+# --- Which budget lines each committee owns ------------------------------------
+
+
+def test_no_budget_line_belongs_to_two_committees():
+    """A line in two committees would be counted twice in a VP's totals."""
+    seen: dict[int, str] = {}
+    for committee in vp_committees.VP_COMMITTEES:
+        for cid in committee.budget_ids:
+            assert cid not in seen, f"line {cid} is in both {seen[cid]} and {committee.title}"
+            seen[cid] = committee.title
+
+
+def test_every_owned_line_is_a_real_budgeted_line():
+    for committee in vp_committees.VP_COMMITTEES:
+        for cid in committee.budget_ids:
+            assert cid in BUDGETED_COMMITTEE_IDS, f"{committee.title}: {cid} has no budget"
+
+
+def test_finance_is_left_alone():
+    """Treasury (line 2) is the treasurer's own full view, not a VP roll-up."""
+    assert vp_committees.for_committee_id(2) is None
+    assert vp_committees.budget_ids_for(2) == (2,)
+
+
+def test_a_line_resolves_to_the_committee_that_owns_it():
+    assert vp_committees.for_committee_id(16).title == "Membership"  # Passport
+    assert vp_committees.budget_ids_for(16) == vp_committees.budget_ids_for(5)
+
+
+def test_an_unmapped_committee_falls_back_to_just_itself():
+    assert vp_committees.budget_ids_for(8) == (8,)  # Meeting Food
+    assert vp_committees.title_for(8) == committee_name(8)
+    assert vp_committees.budget_ids_for(None) == ()
+
+
+# --- The maths behind the page -------------------------------------------------
+
+
+def _summary(rows):
+    return pd.DataFrame(rows, columns=["Committee_Name", "Budget", "Spent"])
+
+
+def test_rollup_adds_the_named_lines_and_ignores_the_rest():
+    summary = _summary(
+        [("Membership", 1000.0, 400.0), ("Passport", 500.0, 350.0), ("Consulting", 900.0, 900.0)]
+    )
+    total = vp_metrics.rollup(summary, ["Membership", "Passport"])
+    assert total["budget"] == 1500.0
+    assert total["spent"] == 750.0
+    assert total["remaining"] == 750.0
+    assert total["percent"] == pytest.approx(50.0)
+
+
+def test_rollup_with_no_budget_has_no_percent_rather_than_infinity():
+    total = vp_metrics.rollup(_summary([("Passport", 0.0, 25.0)]), ["Passport"])
+    assert total["percent"] is None
+
+
+def test_status_matches_the_org_wide_dashboard_at_every_boundary():
+    """One committee must never read 'on track' here and 'approaching' there."""
+    for percent in [0, 50, 84.9, 85, 99.9, 100, 100.1, 250]:
+        row = pd.Series({"% Spent": percent, "Spent": 10.0})
+        assert vp_metrics.status_for(percent, 10.0) == budget_domain._status_for_row(row)
+    for spent in (0.0, 10.0):
+        row = pd.Series({"% Spent": None, "Spent": spent})
+        assert vp_metrics.status_for(None, spent) == budget_domain._status_for_row(row)
+
+
+def test_term_elapsed_percent_runs_from_zero_to_a_hundred():
+    terms = pd.DataFrame(
+        {"TermID": ["T1"], "Semester": ["Fall 2026"], "start_date": ["2026-08-01"], "end_date": ["2026-11-30"]}
+    )
+    at = lambda day: vp_metrics.term_elapsed_percent(terms, "Fall 2026", as_of=pd.Timestamp(day))
+    assert at("2026-07-01") == 0.0  # before the term starts
+    assert at("2026-09-30") == pytest.approx(60 / 121 * 100)  # Aug 1 -> Sep 30 is 60 of 121 days
+    assert at("2027-01-01") == 100.0  # after it ends
+    assert vp_metrics.term_elapsed_percent(terms, "Spring 1999") is None
+
+
+def test_projection_is_a_straight_line_and_declines_to_guess_early():
+    assert vp_metrics.projected_spend(300.0, 50.0) == pytest.approx(600.0)
+    assert vp_metrics.projected_spend(300.0, 100.0) == pytest.approx(300.0)
+    assert vp_metrics.projected_spend(300.0, 5.0) is None  # too early to say
+    assert vp_metrics.projected_spend(300.0, None) is None
+
+
+# --- The roll-up on the page ---------------------------------------------------
+
+
+@pytest.fixture
+def membership_db(seeded_db, use_db):
+    """
+    The seed books nothing to Membership (5) or Passport (16), so a leak of either
+    would go unnoticed. Re-book a few Meeting Food rows into each, on this test's
+    private copy, so there is something to leak and something to roll up.
+    """
+    import sqlite3
+
+    path = use_db(seeded_db)
+    with sqlite3.connect(path) as connection:
+        ids = [
+            row[0]
+            for row in connection.execute(
+                "SELECT transactionid FROM transactions WHERE budget_category = 8 "
+                "ORDER BY transactionid LIMIT 6"
+            )
+        ]
+        connection.executemany(
+            "UPDATE transactions SET budget_category = ? WHERE transactionid = ?",
+            [(5, ids[0]), (5, ids[1]), (5, ids[2]), (16, ids[3]), (16, ids[4]), (16, ids[5])],
+        )
+    return path
+
+
+def test_the_roll_up_fixture_really_put_rows_in_both_lines(membership_db):
+    assert _committee_rows(5) and len(_committee_rows(5)) == len(_committee_rows(16)) == 6
+
+
+def test_the_membership_vp_sees_membership_and_passport_rows_and_nothing_else(membership_db):
+    app = run_as(VIEWS / "MyTransactions.py", OFFICER, 5, mytxn_semester="All")
+    assert_clean(app, "My Transactions as the Membership VP")
+    shown = app.dataframe[0].value
+    assert set(shown["Line"]) == {"Membership", "Passport"}
+    got = sorted(
+        (str(pd.Timestamp(date).date()), round(float(amount), 2), str(details))
+        for date, amount, details in zip(shown["Date"], shown["Amount"], shown["Details"])
+    )
+    assert got == _committee_rows(5)
+
+
+def test_the_budget_line_filter_narrows_to_one_line(membership_db):
+    app = run_as(
+        VIEWS / "MyTransactions.py", OFFICER, 5, mytxn_semester="All", mytxn_line="Passport"
+    )
+    assert_clean(app, "My Transactions filtered to Passport")
+    assert set(app.dataframe[0].value["Line"]) == {"Passport"}
+
+
+def test_my_committee_shows_a_by_line_table_for_a_two_line_committee(membership_db):
+    app = run_as(VIEWS / "Officer.py", OFFICER, 5)
+    assert_clean(app, "My Committee as the Membership VP")
+    by_line = next(
+        (element.value for element in app.dataframe if "Budget line" in element.value.columns),
+        None,
+    )
+    assert by_line is not None, "no per-line table for a committee that owns two lines"
+    assert set(by_line["Budget line"]) == {"Membership", "Passport"}
+
+
+def test_a_single_line_committee_gets_no_by_line_table(seeded_db, use_db):
+    use_db(seeded_db)
+    app = run_as(VIEWS / "Officer.py", OFFICER, 7)  # Consulting
+    assert_clean(app, "My Committee as the Consulting VP")
+    assert not any("Budget line" in element.value.columns for element in app.dataframe)
+
+
+def test_a_passport_profile_gets_the_same_page_as_a_membership_profile(membership_db):
+    """The profile may carry either line; both must land on the Membership roll-up."""
+    as_membership = run_as(VIEWS / "MyTransactions.py", OFFICER, 5, mytxn_semester="All")
+    as_passport = run_as(VIEWS / "MyTransactions.py", OFFICER, 16, mytxn_semester="All")
+    assert as_membership.dataframe[0].value.equals(as_passport.dataframe[0].value)

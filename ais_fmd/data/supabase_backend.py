@@ -38,7 +38,7 @@ from datetime import datetime, timezone
 import pandas as pd
 
 from .. import settings
-from .backend import Backend, TransactionChange, UpdateResult, UploadReceipt
+from .backend import Backend, TransactionChange, UpdateResult, UploadReceipt, normalize_email
 
 PAGE_SIZE = 1000
 
@@ -254,17 +254,20 @@ class SupabaseBackend(Backend):
         """
         One person's access record, or None on a miss.
 
-        `ilike` rather than `eq` for the same reason `sqlite_backend.py` uses
-        `lower(email) = lower(?)`: Google's identity token capitalises an email
-        however the account was originally typed, which does not always match
-        how a treasurer typed it into `profiles`.
+        Matched with `eq` on the normalized (lowercase) email, which is also how
+        `upsert_profile` stores it. This used to be `ilike`, but in a LIKE
+        pattern `_` and `%` are wildcards and `_` is common in real addresses --
+        `a_b@x.edu` matched `a.b@x.edu`, so a lookup that decides who gets in as
+        which committee could land on a different person's row (and, with
+        `maybe_single`, error out when it matched two).
         """
-        if not email:
+        key = normalize_email(email)
+        if not key:
             return None
         response = (
             self._anon.table("profiles")
             .select("*")
-            .ilike("email", email)
+            .eq("email", key)
             .maybe_single()
             .execute()
         )
@@ -654,7 +657,7 @@ class SupabaseBackend(Backend):
         actor: str,
     ) -> UpdateResult:
         result = UpdateResult()
-        email = (email or "").strip()
+        email = normalize_email(email)
         if not email:
             result.error = "An email is required."
             return result
@@ -679,12 +682,15 @@ class SupabaseBackend(Backend):
 
     def remove_profile(self, email: str) -> UpdateResult:
         result = UpdateResult()
-        if not email:
+        key = normalize_email(email)
+        if not key:
             result.error = "An email is required."
             return result
         try:
+            # Exact match, never a pattern: a wildcard here would delete every
+            # profile the pattern happens to match, not just the one chosen.
             response = (
-                self._admin.table("profiles").delete().ilike("email", email).execute()
+                self._admin.table("profiles").delete().eq("email", key).execute()
             )
             result.updated = len(response.data or [])
         except Exception as exc:  # noqa: BLE001

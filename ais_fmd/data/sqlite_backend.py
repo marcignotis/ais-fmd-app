@@ -21,7 +21,7 @@ from typing import Iterator
 import pandas as pd
 
 from .. import settings
-from .backend import Backend, TransactionChange, UpdateResult, UploadReceipt
+from .backend import Backend, TransactionChange, UpdateResult, UploadReceipt, normalize_email
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS committees (
@@ -630,7 +630,7 @@ class SqliteBackend(Backend):
         rather than a plain write.
         """
         result = UpdateResult()
-        email = (email or "").strip()
+        email = normalize_email(email)  # stored lowercase, like the Supabase backend
         if not email:
             result.error = "An email is required."
             return result

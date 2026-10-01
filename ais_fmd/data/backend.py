@@ -21,6 +21,20 @@ import pandas as pd
 from .. import settings
 
 
+def normalize_email(value: object) -> str:
+    """
+    The one spelling of an email that profiles are stored and looked up by.
+
+    Google's token capitalises an address however the account was first typed, so
+    lookups must ignore case. Doing that by storing lowercase and comparing for
+    equality -- rather than with `ILIKE` -- matters: in a LIKE pattern `_` and
+    `%` are wildcards, and `_` is common in real addresses, so `a_b@x.edu` would
+    also match `a.b@x.edu`. For a lookup that decides who gets in as which
+    committee, "matches a different person's row" is the failure to rule out.
+    """
+    return str(value or "").strip().lower()
+
+
 @dataclass
 class UploadReceipt:
     """Result of an atomic statement upload."""

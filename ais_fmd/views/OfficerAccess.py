@@ -56,6 +56,10 @@ with st.expander("Add or update someone", expanded=True):
         cleaned_email = email.strip()
         if not cleaned_email or "@" not in cleaned_email:
             shell.error_state("Not saved", "Enter a valid email address.")
+        elif role == "officer" and committee_choice == "— none —":
+            # An officer is defined by their committee. Saving one without it would
+            # let them sign in and then see nothing, which looks like a bug.
+            shell.error_state("Not saved", "An officer needs a committee. Pick one.")
         else:
             committee_id = (
                 None

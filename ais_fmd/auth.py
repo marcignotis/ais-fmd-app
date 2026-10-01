@@ -174,7 +174,22 @@ def login_gate() -> None:
     denied_google_email: str | None = None
     if _google_auth_configured():
         if getattr(st.user, "is_logged_in", False):
-            identity = _identity_for_google_user(dict(st.user))
+            lookup_failed = False
+            try:
+                identity = _identity_for_google_user(dict(st.user))
+            except Exception:  # noqa: BLE001 - fail closed, whatever went wrong
+                # The access list could not be read at all -- most likely the
+                # `profiles` table has not been created yet. Refuse, say what
+                # actually happened (not "you are not on the list", which would
+                # send a VP to the treasurer for the wrong reason), and leave the
+                # treasury password form below working. An unhandled error here
+                # would show a signed-in VP a stack trace instead.
+                identity = None
+                lookup_failed = True
+                st.warning(
+                    "Signed in with Google, but access could not be checked right "
+                    "now. Try again shortly, or ask the treasurer."
+                )
             if identity is not None:
                 st.session_state[SESSION_KEY] = identity
                 st.rerun()
@@ -182,7 +197,8 @@ def login_gate() -> None:
             # silently downgraded. Falls through to the password form below
             # rather than stopping here, so a treasurer whose own email is
             # mistyped in `profiles` still has a way in.
-            denied_google_email = str(st.user.get("email") or "unknown address")
+            if not lookup_failed:
+                denied_google_email = str(st.user.get("email") or "unknown address")
         else:
             st.caption("VP access")
             if st.button("Sign in with Google", type="primary", key="google_login_button"):
@@ -296,6 +312,12 @@ def _identity_for_google_user(
     """
     email = str(user_info.get("email") or "").strip()
     if not email:
+        return None
+    # Google puts `email_verified` in the identity token. An address the provider
+    # has not verified proves nothing about who is typing it, so it cannot be
+    # matched against an access list. Absent is treated as fine (a plain dict in
+    # a test, or a provider that omits it); explicitly false is refused.
+    if user_info.get("email_verified") is False:
         return None
     profile = fetch_profile(email)
     if profile is None:

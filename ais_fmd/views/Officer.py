@@ -28,7 +28,7 @@ from ais_fmd.config import vp_committees
 from ais_fmd.config.categories import BUDGETED_COMMITTEE_IDS, committee_name
 from ais_fmd.data import repositories as repo
 from ais_fmd.domain import budgets as budget_domain
-from ais_fmd.domain import committee_report, exports
+from ais_fmd.domain import committee_report, exports, vp_history
 from ais_fmd.domain import reimbursements as reimb
 from ais_fmd.domain import vp_metrics
 from ais_fmd.domain.money import format_currency
@@ -285,6 +285,33 @@ else:
         "The solid line is what you have spent. The dashed line is where an even "
         "spend across the term would be, so being above it means ahead of pace.",
         caption=True,
+    )
+
+# Where this committee stood at the same point in earlier terms: the other half of
+# "is 95% spent unusual?". Shown only when there is something meaningful to say.
+past_terms = vp_history.same_point_in_past_terms(
+    transactions,
+    bundle.budgets,
+    bundle.terms,
+    line_ids,
+    semester,
+    through=freshness["through"],
+    today=pd.Timestamp.today().normalize(),
+)
+if past_terms is not None:
+    st.markdown("**Compared with the same point in past terms**")
+    shell.say(vp_history.comparison_sentence(past_terms) or "")
+    shell.dataframe(
+        vp_history.display_frame(past_terms),
+        column_config={
+            "Spent by this point": st.column_config.NumberColumn(format="$%.2f"),
+            "Of its budget": st.column_config.NumberColumn(format="%.0f%%"),
+        },
+    )
+    st.caption(
+        f"\"Same point\" means {past_terms.elapsed_percent:.0f}% of the way through each "
+        f"term, as of {past_terms.as_of:%b} {past_terms.as_of.day} (the earlier of today "
+        "and the latest charge on record). Each term is measured against its own budget."
     )
 
 st.markdown('<hr class="ais-rule" />', unsafe_allow_html=True)

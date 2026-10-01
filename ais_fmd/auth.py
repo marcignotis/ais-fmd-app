@@ -365,6 +365,43 @@ def require(required: Role) -> Identity:
     raise AssertionError("unreachable")  # pragma: no cover
 
 
+_DEMO_NONE = "—"
+
+
+def _demo_profile_emails() -> list[str]:
+    """The fake profiles in the sandbox's access list, for the demo sign-in picker."""
+    try:
+        from .data import repositories as repo
+
+        frame = repo.load_profiles()
+    except Exception:  # noqa: BLE001 - a sandbox with no profiles simply has no demo sign-in
+        return []
+    if frame is None or frame.empty or "email" not in frame.columns:
+        return []
+    return sorted(str(email) for email in frame["email"])
+
+
+def _apply_demo_profile() -> None:
+    """
+    Sign in as the chosen fake profile, via the same lookup Google sign-in uses.
+
+    A callback, so it runs before the page reruns. It also sets the role and
+    committee pickers to match: otherwise their remembered values would be read
+    next and quietly put the identity back to whatever was chosen before.
+    """
+    email = st.session_state.get("ais_demo_profile")
+    st.session_state["ais_demo_profile"] = _DEMO_NONE  # back to the prompt; the identity stays
+    if not email or email == _DEMO_NONE:
+        return
+    identity = _identity_for_google_user({"email": email, "email_verified": True})
+    if identity is None:
+        return
+    set_identity(identity)
+    st.session_state["ais_role_picker"] = identity.role
+    if identity.committee_id is not None:
+        st.session_state["ais_committee_picker"] = identity.committee_id
+
+
 def role_switcher() -> None:
     """
     Sandbox-only control for exercising the gating.
@@ -377,6 +414,21 @@ def role_switcher() -> None:
 
     identity = current_user()
     st.sidebar.markdown("### Signed in as")
+
+    demo_emails = _demo_profile_emails()
+    if demo_emails:
+        st.sidebar.selectbox(
+            "Demo sign-in",
+            [_DEMO_NONE] + demo_emails,
+            key="ais_demo_profile",
+            on_change=_apply_demo_profile,
+            help=(
+                "Sandbox only. Signs in as one of the fake profiles, through the same "
+                "lookup Google sign-in will use, so you see exactly what that person would."
+            ),
+        )
+    st.sidebar.caption(identity.email)
+
     options = list(Role)
     chosen = st.sidebar.selectbox(
         "Role",

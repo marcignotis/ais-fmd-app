@@ -3,10 +3,12 @@ Add fake demo transactions for the VP committees to the SANDBOX database.
 
 The normal seed books almost nothing to Membership or Passport and spreads most
 committees' spending over a single purpose, so a VP's page comes up nearly empty.
-This tops each VP committee up to a chosen share of its budget over the last
-three terms, with several purposes, a few refunds or deposits coming in, and a
-mix of states (on track, approaching, over), so every chart and table on My
-Committee and My Transactions has something to draw.
+This tops each VP committee up to a chosen share of its budget in every term the
+sandbox has (five, back to Fall 2024), with several purposes, a few refunds or
+deposits coming in, and a mix of states (on track, approaching, over), so every
+chart, table and past-term comparison on My Committee and My Transactions has
+something to draw. It also adds a fake sign-in profile for each VP and the
+treasurer, and a few sample flags for the Review Queue.
 
 Everything here is invented: made-up venues and vendors, no real names, card
 numbers or amounts from any statement. It refuses to run outside the sandbox.
@@ -39,18 +41,20 @@ ACTOR = "vp-demo-seed@sandbox.local"
 
 # The terms to fill and how far into the latest one the demo data reaches. The
 # regular seed already runs to late October of Fall 2026.
-TERM_IDS = ("FA25", "SP26", "FA26")
+TERM_IDS = ("FA24", "SP25", "FA25", "SP26", "FA26")
 LATEST_DATA_DAY = date(2026, 10, 22)
 
 # Share of each term's budget to bring a line up to: {line: {term: share}}.
-# Chosen to give every status. Existing spending counts toward the share, and a
-# line already past its target is left alone, never reduced.
+# Chosen to give every status and some variety from term to term, so the
+# past-term comparison has a real spread to report. Existing spending counts
+# toward the share, and a line already past its target is left alone, never
+# reduced.
 TARGET_SHARE = {
-    5: {"FA25": 0.62, "SP26": 0.80, "FA26": 0.88},   # Membership: approaching
-    16: {"FA25": 0.40, "SP26": 0.75, "FA26": 1.12},  # Passport: over
-    10: {"FA25": 0.55, "SP26": 0.70, "FA26": 0.45},  # Professional Development: on track
-    7: {"FA25": 0.50, "SP26": 0.90, "FA26": 0.60},   # Consulting
-    9: {"FA25": 0.50, "SP26": 0.70, "FA26": 0.50},   # Marketing (already over in Fall 2026)
+    5: {"FA24": 0.55, "SP25": 0.70, "FA25": 0.62, "SP26": 0.80, "FA26": 0.88},   # Membership: approaching
+    16: {"FA24": 0.45, "SP25": 0.60, "FA25": 0.40, "SP26": 0.75, "FA26": 1.12},  # Passport: over
+    10: {"FA24": 0.50, "SP25": 0.65, "FA25": 0.55, "SP26": 0.70, "FA26": 0.45},  # Professional Development: on track
+    7: {"FA24": 0.40, "SP25": 0.55, "FA25": 0.50, "SP26": 0.90, "FA26": 0.60},   # Consulting
+    9: {"FA24": 0.60, "SP25": 0.45, "FA25": 0.50, "SP26": 0.70, "FA26": 0.50},   # Marketing (already over in Fall 2026)
 }
 
 # (purpose, weight, vendor names). Invented vendors only.
@@ -90,6 +94,32 @@ INCOMING = [
     (5, "Refunded", "VENUE DEPOSIT REFUND", 75.00, "SP26"),
     (9, "Refunded", "PRINT ORDER REFUND", 42.50, "FA26"),
     (16, "Sponsorship / Donation", "CULTURAL NIGHT SPONSOR DEPOSIT", 200.00, "FA26"),
+    (10, "Sponsorship / Donation", "CORPORATE WORKSHOP SPONSOR DEPOSIT", 250.00, "SP25"),
+    (5, "Refunded", "VENUE DEPOSIT REFUND", 60.00, "FA24"),
+    (9, "Refunded", "PRINT ORDER REFUND", 35.00, "FA25"),
+]
+
+# Fake sign-in profiles, one per VP committee plus the treasurer. Invented
+# `@sandbox.local` addresses only -- real emails never go in this repository.
+# (email, role, committee line, display name)
+PROFILES = [
+    ("vp.professional-development@sandbox.local", "officer", 10, "Demo VP (Professional Development)"),
+    ("vp.consulting@sandbox.local", "officer", 7, "Demo VP (Consulting)"),
+    ("vp.marketing@sandbox.local", "officer", 9, "Demo VP (Marketing)"),
+    ("vp.membership@sandbox.local", "officer", 5, "Demo VP (Membership)"),
+    ("treasurer@sandbox.local", "treasurer", None, "Demo Treasurer"),
+]
+
+# Sample "This isn't ours" flags so the Review Queue has something in it:
+# (flagging profile, the committee line the charge sits in, note, how it is closed).
+DEMO_FLAGS = [
+    ("vp.consulting@sandbox.local", 7,
+     "This looks like a Marketing website charge, not a Consulting project.", None),
+    ("vp.professional-development@sandbox.local", 10,
+     "We did not host this event; it was a Membership social.", None),
+    ("vp.marketing@sandbox.local", 9,
+     "I think part of this was split with Membership.",
+     ("dismissed", "Checked the receipt: it is Marketing's. Leaving it booked there.")),
 ]
 
 
@@ -219,8 +249,41 @@ def main() -> int:
     for line in TARGET_SHARE:
         added = sum(1 for record in records if record["budget_category"] == line)
         print(f"  {committee_name(line):<26} +{added} rows")
+
+    for email, role, line, name in PROFILES:
+        result = backend.upsert_profile(email, role, line, name, ACTOR)
+        if not result.ok:
+            print(f"Could not add profile {email}: {result.error}")
+            return 1
+    print(f"Added {len(PROFILES)} fake sign-in profiles (VPs and the treasurer).")
+
+    added_flags = _add_demo_flags(backend)
+    print(f"Added {added_flags} sample flags for the Review Queue.")
     print("Restart Streamlit to see them straight away.")
     return 0
+
+
+def _add_demo_flags(backend: SqliteBackend) -> int:
+    """File the sample flags on each committee's newest charge, closing one of them."""
+    from ais_fmd.config import vp_committees
+
+    charges = backend.fetch_transactions()
+    made = 0
+    for email, line, note, closing in DEMO_FLAGS:
+        owned = vp_committees.budget_ids_for(line)
+        rows = charges[charges["budget_category"].eq(line).fillna(False) & (charges["amount"] < 0)]
+        if rows.empty:
+            continue
+        charge_id = int(rows.sort_values("transaction_date").iloc[-1]["transactionid"])
+        if not backend.create_flag(charge_id, owned, note, email).ok:
+            continue
+        made += 1
+        if closing is not None:
+            status, reply = closing
+            open_flags = backend.fetch_flags(owned)
+            flag_id = int(open_flags[open_flags["transaction_id"] == charge_id].iloc[0]["flag_id"])
+            backend.resolve_flag(flag_id, status, "treasurer@sandbox.local", reply)
+    return made
 
 
 if __name__ == "__main__":

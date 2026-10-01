@@ -31,6 +31,7 @@ from ais_fmd.domain import dues
 from ais_fmd.domain.categorize.pipeline import categorize_records
 from ais_fmd.domain.categorize.scoring import CardRegistry, current_era
 from ais_fmd.ui import charts, shell
+from ais_fmd.ui import flags as flag_ui
 
 identity = auth.require(auth.Role.TREASURER)
 
@@ -46,6 +47,10 @@ transactions = repo.load_transactions()
 if transactions.empty:
     shell.empty_state("No transactions yet", "Upload a statement from the Treasury page.")
     st.stop()
+
+# Charges a VP has disputed ("This isn't ours"). One call; the panel lives in
+# ui/flags.py so this shared page stays untouched otherwise.
+flag_ui.treasurer_panel(transactions, identity.email)
 
 pending = transactions[
     transactions["budget_category"].isna() | transactions["purpose"].isna()

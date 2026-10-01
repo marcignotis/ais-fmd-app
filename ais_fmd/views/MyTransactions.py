@@ -18,7 +18,9 @@ from ais_fmd import auth
 from ais_fmd.config import vp_committees
 from ais_fmd.config.categories import committee_name
 from ais_fmd.data import repositories as repo
+from ais_fmd.domain import flags as flags_domain
 from ais_fmd.domain.terms import attach_semester, default_semester_index, ordered_semesters
+from ais_fmd.ui import flags as flag_ui
 from ais_fmd.ui import shell
 
 identity = auth.require(auth.Role.OFFICER)
@@ -119,11 +121,28 @@ table = pd.DataFrame(
 if len(line_ids) > 1:
     table.insert(1, "Line", view["budget_category"].map(committee_name))
 
+# Flags on this committee's charges, or None when this deployment cannot store
+# them yet (the feature is then hidden rather than erroring).
+flags = flag_ui.load_flags_or_none(line_ids)
+if flags is not None:
+    flag_status = flags_domain.status_by_transaction(flags)
+    if flag_status:
+        table["Flag"] = view["transactionid"].map(
+            lambda tid: flags_domain.vp_status_label(flag_status[int(tid)])
+            if int(tid) in flag_status
+            else ""
+        )
+
 shell.dataframe(
     table,
     column_config={"Amount": st.column_config.NumberColumn(format="$%.2f")},
     height=520,
 )
-st.caption(
-    "Read-only. If a charge looks like it belongs to another committee, tell the treasurer."
-)
+
+if flags is None:
+    st.caption(
+        "Read-only. If a charge looks like it belongs to another committee, tell the treasurer."
+    )
+else:
+    st.caption("Read-only. If a charge belongs to another committee, flag it below.")
+    flag_ui.vp_panel(view, bundle.transactions, flags, line_ids, identity.email)

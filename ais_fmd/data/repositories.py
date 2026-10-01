@@ -373,6 +373,41 @@ def reconcile_all():
     return _cached_reconciliation(data_version())
 
 
+# --- "This isn't ours" flags --------------------------------------------------
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _flags(version: int, committee_ids: tuple[int, ...] | None) -> pd.DataFrame:
+    return backend().fetch_flags(committee_ids)
+
+
+def load_flags(committee_ids: tuple[int, ...] | None = None) -> pd.DataFrame:
+    """
+    Flags, open first. Pass a VP's `committee_ids` to get only flags on charges
+    booked to their lines; `None` is every flag, for the treasurer.
+
+    Raises if the backend cannot answer (for example the table has not been
+    created yet); callers check before drawing the feature rather than assuming.
+    """
+    scope = None if committee_ids is None else tuple(int(i) for i in committee_ids)
+    return _flags(data_version(), scope)
+
+
+def create_flag(
+    transaction_id: int, allowed_committee_ids: tuple[int, ...], note: str, actor: str
+) -> UpdateResult:
+    result = backend().create_flag(transaction_id, allowed_committee_ids, note, actor)
+    if result.updated:
+        invalidate()
+    return result
+
+
+def resolve_flag(flag_id: int, status: str, actor: str, note: str = "") -> UpdateResult:
+    result = backend().resolve_flag(flag_id, status, actor, note)
+    if result.updated:
+        invalidate()
+    return result
+
+
 def locked_semesters() -> set[str]:
     """Names of terms currently closed to edits."""
     terms = load_terms()

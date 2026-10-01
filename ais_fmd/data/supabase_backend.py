@@ -38,6 +38,7 @@ from datetime import datetime, timezone
 import pandas as pd
 
 from .. import settings
+from ..domain import flags as flags_domain
 from .backend import Backend, TransactionChange, UpdateResult, UploadReceipt, normalize_email
 
 PAGE_SIZE = 1000
@@ -693,6 +694,130 @@ class SupabaseBackend(Backend):
                 self._admin.table("profiles").delete().eq("email", key).execute()
             )
             result.updated = len(response.data or [])
+        except Exception as exc:  # noqa: BLE001
+            result.error = f"{type(exc).__name__}: {exc}"
+        return result
+
+    # --- "This isn't ours" flags ---------------------------------------------
+    #
+    # Needs migrations/006_transaction_flags.sql, which has NOT been run against
+    # any database. Like the other Supabase methods added for the VP portal, this
+    # has never executed against a real Postgres instance.
+
+    def fetch_flags(self, committee_ids: tuple[int, ...] | None = None) -> pd.DataFrame:
+        query = self._anon.table("transaction_flags").select("*")
+        if committee_ids is not None:
+            ids = [int(committee_id) for committee_id in committee_ids]
+            if not ids:
+                return pd.DataFrame()
+            query = query.in_("booked_to_committee_id", ids)
+        frame = pd.DataFrame(query.order("flag_id", desc=True).execute().data or [])
+        if frame.empty:
+            return frame
+        # Open first, then newest -- matching sqlite_backend.py. Sorted here
+        # because PostgREST orders by column, not by a CASE expression.
+        frame["_rank"] = frame["status"].map(lambda status: 0 if status == flags_domain.OPEN else 1)
+        return frame.sort_values("_rank", kind="stable").drop(columns="_rank")
+
+    def create_flag(
+        self,
+        transaction_id: int,
+        allowed_committee_ids: tuple[int, ...],
+        note: str,
+        actor: str,
+    ) -> UpdateResult:
+        result = UpdateResult()
+        cleaned, problem = flags_domain.clean_note(note)
+        if problem:
+            result.error = problem
+            return result
+
+        allowed = {int(committee_id) for committee_id in allowed_committee_ids}
+        try:
+            charge = (
+                self._anon.table("transactions")
+                .select("budget_category")
+                .eq("transactionid", int(transaction_id))
+                .maybe_single()
+                .execute()
+            )
+            if charge is None or charge.data is None:
+                result.error = f"Charge {transaction_id} does not exist."
+                return result
+            booked_to = charge.data.get("budget_category")
+            if booked_to is None or int(booked_to) not in allowed:
+                result.error = "That charge is not booked to your committee, so you cannot flag it."
+                return result
+
+            existing = (
+                self._anon.table("transaction_flags")
+                .select("flag_id")
+                .eq("transaction_id", int(transaction_id))
+                .eq("status", flags_domain.OPEN)
+                .execute()
+            )
+            if existing.data:
+                result.unchanged = 1
+                return result
+
+            self._admin.table("transaction_flags").insert(
+                {
+                    "transaction_id": int(transaction_id),
+                    "booked_to_committee_id": int(booked_to),
+                    "flagged_by": actor,
+                    "note": cleaned,
+                    "status": flags_domain.OPEN,
+                }
+            ).execute()
+            self._audit(
+                transaction_id=int(transaction_id),
+                action="flag",
+                actor=actor,
+                field="not our charge",
+                new_value=cleaned[:120],
+            )
+            result.updated = 1
+        except Exception as exc:  # noqa: BLE001
+            result.error = f"{type(exc).__name__}: {exc}"
+        return result
+
+    def resolve_flag(self, flag_id: int, status: str, actor: str, note: str = "") -> UpdateResult:
+        result = UpdateResult()
+        if status not in flags_domain.CLOSING_STATUSES:
+            result.error = f"Unknown status {status!r}."
+            return result
+        try:
+            existing = (
+                self._anon.table("transaction_flags")
+                .select("status,transaction_id")
+                .eq("flag_id", int(flag_id))
+                .maybe_single()
+                .execute()
+            )
+            if existing is None or existing.data is None:
+                result.error = f"Flag {flag_id} does not exist."
+                return result
+            if existing.data.get("status") != flags_domain.OPEN:
+                result.unchanged = 1
+                return result
+
+            self._admin.table("transaction_flags").update(
+                {
+                    "status": status,
+                    "resolved_at": _now(),
+                    "resolved_by": actor,
+                    "resolution_note": (note or "").strip() or None,
+                }
+            ).eq("flag_id", int(flag_id)).eq("status", flags_domain.OPEN).execute()
+            self._audit(
+                transaction_id=int(existing.data["transaction_id"]),
+                action="flag_resolved",
+                actor=actor,
+                field=f"flag {flag_id}",
+                old_value=flags_domain.OPEN,
+                new_value=status,
+            )
+            result.updated = 1
         except Exception as exc:  # noqa: BLE001
             result.error = f"{type(exc).__name__}: {exc}"
         return result

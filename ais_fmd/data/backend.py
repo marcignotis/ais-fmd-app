@@ -218,6 +218,31 @@ class Backend(ABC):
     def remove_profile(self, email: str) -> UpdateResult:
         return self._unsupported("VP portal access")
 
+    # --- "This isn't ours" flags ---------------------------------------------
+    #
+    # A VP disputing a charge booked to their committee. A flag is a note to the
+    # treasurer; it never changes the booking.
+
+    def fetch_flags(self, committee_ids: tuple[int, ...] | None = None) -> pd.DataFrame:
+        """All flags, or with `committee_ids` only those on charges booked to them."""
+        return pd.DataFrame()
+
+    def create_flag(
+        self,
+        transaction_id: int,
+        allowed_committee_ids: tuple[int, ...],
+        note: str,
+        actor: str,
+    ) -> UpdateResult:
+        """
+        `allowed_committee_ids` is every budget line the caller owns; the backend
+        refuses a charge booked anywhere else.
+        """
+        return self._unsupported("Flagging a charge")
+
+    def resolve_flag(self, flag_id: int, status: str, actor: str, note: str = "") -> UpdateResult:
+        return self._unsupported("Resolving a flag")
+
 
 def get_backend() -> Backend:
     """

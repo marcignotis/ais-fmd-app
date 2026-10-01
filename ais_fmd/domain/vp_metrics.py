@@ -143,3 +143,113 @@ def budget_flow(
 
     measures = ["relative"] * (len(labels) - 1) + ["total"]
     return labels, values, measures
+
+
+def _long_date(value: pd.Timestamp) -> str:
+    """'Oct 22, 2026' -- without the platform-specific `%-d` that Windows rejects."""
+    return f"{value:%b} {value.day}, {value.year}"
+
+
+def data_freshness(
+    df_transactions: pd.DataFrame, df_uploaded_files: pd.DataFrame
+) -> dict[str, pd.Timestamp | None]:
+    """
+    How current the ledger is: the latest charge on record, and when statements
+    were last uploaded.
+
+    Deliberately about the whole ledger rather than one committee. A VP whose
+    last charge was a month ago would otherwise read "no recent activity" as "the
+    data is a month old"; the ledger-wide date says how far the statements reach,
+    and a single date discloses nothing about any other committee.
+    """
+    through = None
+    if df_transactions is not None and not df_transactions.empty:
+        latest = pd.to_datetime(df_transactions["transaction_date"], errors="coerce").max()
+        through = None if pd.isna(latest) else latest
+
+    uploaded = None
+    if (
+        df_uploaded_files is not None
+        and not df_uploaded_files.empty
+        and "uploaded_at" in df_uploaded_files.columns
+    ):
+        latest = pd.to_datetime(df_uploaded_files["uploaded_at"], errors="coerce").max()
+        uploaded = None if pd.isna(latest) else latest
+
+    return {"through": through, "uploaded": uploaded}
+
+
+def freshness_text(df_transactions: pd.DataFrame, df_uploaded_files: pd.DataFrame) -> str:
+    """One plain sentence a VP can read to know whether the numbers are current."""
+    fresh = data_freshness(df_transactions, df_uploaded_files)
+    if fresh["through"] is None:
+        return "No statements have been uploaded yet, so there are no figures to show."
+    text = f"Includes charges through {_long_date(fresh['through'])}."
+    if fresh["uploaded"] is not None:
+        text += f" Statements last uploaded {_long_date(fresh['uploaded'])}."
+    return text
+
+
+def cumulative_spend(
+    df_transactions: pd.DataFrame,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    through: pd.Timestamp | None,
+) -> pd.DataFrame:
+    """
+    Running total of money spent, one point per day from `start` to the last day
+    the data reaches. Columns: date, spent.
+
+    Only expenses (negative amounts) count, matching "Spent" everywhere else, and
+    only rows dated inside [start, end]. The line stops at `through` rather than
+    running flat to the end of the term: a flat tail would read as "spent nothing
+    since", when the truth is "we don't know yet".
+    """
+    columns = ["date", "spent"]
+    if through is None:
+        return pd.DataFrame(columns=columns)
+
+    last = min(pd.Timestamp(through).normalize(), pd.Timestamp(end).normalize())
+    first = pd.Timestamp(start).normalize()
+    if last < first:
+        return pd.DataFrame(columns=columns)
+
+    days = pd.date_range(first, last, freq="D")
+    if df_transactions is None or df_transactions.empty:
+        return pd.DataFrame({"date": days, "spent": 0.0})
+
+    dates = pd.to_datetime(df_transactions["transaction_date"], errors="coerce").dt.normalize()
+    expenses = df_transactions[(df_transactions["amount"] < 0) & dates.between(first, last)]
+    daily = (
+        expenses["amount"].abs().groupby(dates[expenses.index]).sum().reindex(days, fill_value=0.0)
+    )
+    return pd.DataFrame({"date": days, "spent": daily.cumsum().to_numpy()})
+
+
+def pace_sentence(position: dict, elapsed: float | None, semester: str) -> str | None:
+    """
+    "62% of the budget is spent and 38% of Fall 2026 has passed. At this pace..."
+
+    One place for the wording, shared by the page and the printable report so the
+    two can never disagree. None when there is nothing meaningful to say (no term
+    dates, or no budget to take a percentage of).
+    """
+    from .money import format_currency
+
+    percent = position["percent"]
+    if elapsed is None or percent is None:
+        return None
+
+    text = f"{percent:.0f}% of the budget is spent and {elapsed:.0f}% of {semester} has passed."
+    projected = projected_spend(position["spent"], elapsed)
+    if projected is not None:
+        gap = position["budget"] - projected
+        text += (
+            f" At this pace the term ends with {format_currency(projected)} spent, "
+            + (
+                f"{format_currency(gap)} under budget."
+                if gap >= 0
+                else f"{format_currency(-gap)} over budget."
+            )
+        )
+    return text

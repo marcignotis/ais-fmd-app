@@ -18,7 +18,9 @@ from ais_fmd import auth
 from ais_fmd.config import vp_committees
 from ais_fmd.config.categories import committee_name
 from ais_fmd.data import repositories as repo
+from ais_fmd.domain import exports
 from ais_fmd.domain import flags as flags_domain
+from ais_fmd.domain import vp_metrics
 from ais_fmd.domain.terms import attach_semester, default_semester_index, ordered_semesters
 from ais_fmd.ui import flags as flag_ui
 from ais_fmd.ui import shell
@@ -45,6 +47,9 @@ bundle = repo.load_bundle()
 if bundle.transactions.empty:
     shell.empty_state("No transactions yet", " Nothing has been uploaded.")
     st.stop()
+
+# How current the figures are, so a VP knows whether last week's charges are in.
+st.caption(vp_metrics.freshness_text(bundle.transactions, repo.load_uploaded_files()))
 
 # --- Scope: this committee only, before any filter is applied ----------------
 
@@ -137,6 +142,16 @@ shell.dataframe(
     table,
     column_config={"Amount": st.column_config.NumberColumn(format="$%.2f")},
     height=520,
+)
+
+# Exactly the table above (so it follows the filters), with text that a
+# spreadsheet could run as a formula made inert -- see domain/exports.py.
+st.download_button(
+    "Download this list (CSV)",
+    exports.transactions_csv(table),
+    file_name=f"{exports.slug(vp_committees.title_for(committee_id))}_transactions.csv",
+    mime="text/csv",
+    key="download_my_transactions",
 )
 
 if flags is None:

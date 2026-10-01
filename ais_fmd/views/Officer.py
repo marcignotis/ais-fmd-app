@@ -18,24 +18,28 @@ without handing them the keys to everything.
 
 from __future__ import annotations
 
+from datetime import datetime
+
 import pandas as pd
 import streamlit as st
 
-from ais_fmd import auth
+from ais_fmd import auth, settings
 from ais_fmd.config import vp_committees
 from ais_fmd.config.categories import BUDGETED_COMMITTEE_IDS, committee_name
 from ais_fmd.data import repositories as repo
 from ais_fmd.domain import budgets as budget_domain
+from ais_fmd.domain import committee_report, exports
 from ais_fmd.domain import reimbursements as reimb
 from ais_fmd.domain import vp_metrics
 from ais_fmd.domain.money import format_currency
 from ais_fmd.domain.terms import (
     attach_semester,
+    date_range_for_semester,
     default_semester_index,
     ordered_semesters,
     previous_semester,
 )
-from ais_fmd.ui import charts, shell, theme
+from ais_fmd.ui import charts, committee_charts, shell, theme
 
 identity = auth.require(auth.Role.OFFICER)
 
@@ -106,6 +110,12 @@ if not can_choose:
         "You are seeing only your own committee. Treasurers can view any committee."
     )
 
+# How current the figures are, so a VP knows whether last week's charges are in.
+uploaded_files = repo.load_uploaded_files()
+freshness = vp_metrics.data_freshness(bundle.transactions, uploaded_files)
+freshness_note = vp_metrics.freshness_text(bundle.transactions, uploaded_files)
+st.caption(freshness_note)
+
 # --- Scope: this committee's rows only, before anything is computed ----------
 
 transactions = bundle.transactions
@@ -114,6 +124,8 @@ mine = (
     if transactions.empty
     else transactions[transactions["budget_category"].isin(line_ids)]
 )
+scoped = attach_semester(mine, bundle.terms)
+scoped = scoped[scoped["Semester"] == semester]
 
 summary = budget_domain.budget_vs_actual(
     transactions, bundle.budgets, bundle.terms, semester
@@ -174,19 +186,8 @@ if percent is not None:
 # Pace: money used against the share of the term that has passed. Spending 60% of
 # a budget means something different in week 3 than in week 12.
 elapsed = vp_metrics.term_elapsed_percent(bundle.terms, semester)
-if elapsed is not None and percent is not None:
-    pace = f"{percent:.0f}% of the budget is spent and {elapsed:.0f}% of {semester} has passed."
-    projected = vp_metrics.projected_spend(position["spent"], elapsed)
-    if projected is not None:
-        gap = position["budget"] - projected
-        pace += (
-            f" At this pace the term ends with {format_currency(projected)} spent, "
-            + (
-                f"{format_currency(gap)} under budget."
-                if gap >= 0
-                else f"{format_currency(-gap)} over budget."
-            )
-        )
+pace = vp_metrics.pace_sentence(position, elapsed, semester)
+if pace:
     shell.say(pace, caption=True)
 
 if prior:
@@ -199,6 +200,27 @@ if status == "over":
         f"{format_currency(abs(position['remaining']))}. Speak to the treasurer "
         f"before committing anything further.",
     )
+
+# A printable one-page report for this committee and term. Built by a function
+# that does its own scoping, so what is in the file cannot depend on this page.
+report_html = committee_report.build_for_committee(
+    transactions,
+    bundle.budgets,
+    bundle.terms,
+    committee_id,
+    semester,
+    generated=datetime.now(),
+    data_note=freshness_note,
+    sandbox=settings.is_sandbox(),
+)
+st.download_button(
+    "Download committee report",
+    report_html,
+    file_name=f"{exports.slug(chosen_name)}_{exports.slug(semester)}_report.html",
+    mime="text/html",
+    key="download_committee_report",
+    help="A one-page report for this committee and term. Opens in any browser and prints to PDF.",
+)
 
 st.markdown('<hr class="ais-rule" />', unsafe_allow_html=True)
 
@@ -239,12 +261,37 @@ else:
 
 st.markdown('<hr class="ais-rule" />', unsafe_allow_html=True)
 
+# --- Spending pace -----------------------------------------------------------
+
+st.subheader("Spending pace")
+
+term_window = date_range_for_semester(bundle.terms, semester)
+if term_window is None:
+    shell.empty_state("No term dates on record", f"{semester} has no start and end dates set.")
+else:
+    term_start, term_end = term_window
+    spend_so_far = vp_metrics.cumulative_spend(scoped, term_start, term_end, freshness["through"])
+    shell.chart(
+        committee_charts.pace_chart(
+            spend_so_far,
+            position["budget"],
+            term_start,
+            term_end,
+            today=pd.Timestamp.today().normalize(),
+        ),
+        key="committee_pace",
+    )
+    shell.say(
+        "The solid line is what you have spent. The dashed line is where an even "
+        "spend across the term would be, so being above it means ahead of pace.",
+        caption=True,
+    )
+
+st.markdown('<hr class="ais-rule" />', unsafe_allow_html=True)
+
 # --- Where the money went ----------------------------------------------------
 
 st.subheader("Where the money went")
-
-scoped = attach_semester(mine, bundle.terms)
-scoped = scoped[scoped["Semester"] == semester]
 
 expense_split = budget_domain.categorize_flow(scoped, budget_domain.EXPENSE)
 income_split = budget_domain.categorize_flow(scoped, budget_domain.INCOME)

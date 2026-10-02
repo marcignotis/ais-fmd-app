@@ -205,3 +205,168 @@ def test_resetting_the_sandbox_clears_flags_without_a_foreign_key_error(seeded_d
     backend.create_flag(charge_in(backend, 7), (7,), NOTE, VP)
     backend.reset()
     assert backend.fetch_flags().empty
+
+
+# --- The treasurer's verdict moves the charge ------------------------------------------
+
+TREASURER = "treasurer@sandbox.local"
+
+
+def _flagged(backend: SqliteBackend, committee_id: int = 7) -> tuple[int, int]:
+    """File a flag on a committee's charge; return (charge id, flag id)."""
+    charge = charge_in(backend, committee_id)
+    assert backend.create_flag(charge, (committee_id,), NOTE, VP).ok
+    flag_id = int(backend.fetch_flags((committee_id,)).iloc[0]["flag_id"])
+    return charge, flag_id
+
+
+def _spent_by_committee(backend: SqliteBackend, charge_id: int) -> dict[str, float]:
+    """What each committee has spent in the term the charge falls in."""
+    from ais_fmd.domain import budgets as budget_domain
+    from ais_fmd.domain.terms import attach_semester
+
+    transactions, terms = backend.fetch_transactions(), backend.fetch_terms()
+    tagged = attach_semester(transactions, terms)
+    semester = tagged[tagged["transactionid"] == charge_id].iloc[0]["Semester"]
+    summary = budget_domain.budget_vs_actual(transactions, backend.fetch_budgets(), terms, semester)
+    return dict(zip(summary["Committee_Name"], summary["Spent"]))
+
+
+def test_the_verdict_moves_the_charge_and_closes_the_flag_together(seeded_db, use_db):
+    use_db(seeded_db)
+    backend = SqliteBackend()
+    charge, flag_id = _flagged(backend, 7)
+    before = snapshot(backend, charge)
+
+    result = backend.move_flagged_charge(flag_id, 9, TREASURER, "Checked the receipt.")
+    assert result.ok and result.updated == 1
+
+    after = snapshot(backend, charge)
+    assert after["budget_category"] == 9  # now Marketing's
+    for field in ("amount", "details", "purpose", "transaction_date"):
+        assert after[field] == before[field], f"moving the charge changed its {field}"
+
+    flag = backend.fetch_flags().iloc[0]
+    assert flag["status"] == "resolved" and flag["resolved_by"] == TREASURER
+    assert "Moved from Consulting to Marketing." in flag["resolution_note"]
+    assert "Checked the receipt." in flag["resolution_note"]
+
+
+def test_moving_a_charge_moves_the_money_between_the_two_committees_budgets(seeded_db, use_db):
+    use_db(seeded_db)
+    backend = SqliteBackend()
+    charge, flag_id = _flagged(backend, 7)
+    amount = abs(float(snapshot(backend, charge)["amount"]))
+    before = _spent_by_committee(backend, charge)
+
+    backend.move_flagged_charge(flag_id, 9, TREASURER)
+
+    after = _spent_by_committee(backend, charge)
+    assert after["Consulting"] == pytest.approx(before["Consulting"] - amount)
+    assert after["Marketing"] == pytest.approx(before["Marketing"] + amount)
+    others = set(before) - {"Consulting", "Marketing"}
+    assert all(after[name] == pytest.approx(before[name]) for name in others)
+
+
+def test_the_move_is_written_to_the_audit_trail_with_who_and_from_where(seeded_db, use_db):
+    use_db(seeded_db)
+    backend = SqliteBackend()
+    charge, flag_id = _flagged(backend, 7)
+    backend.move_flagged_charge(flag_id, 9, TREASURER)
+
+    audit = backend.fetch_audit()
+    rows = audit[audit["transaction_id"] == charge]
+    moved = rows[(rows["action"] == "update") & (rows["field"] == "budget_category")].iloc[0]
+    assert (str(moved["old_value"]), str(moved["new_value"]), moved["actor"]) == ("7", "9", TREASURER)
+    assert "flag_resolved" in set(rows["action"])
+
+
+def test_the_charges_purpose_is_kept_even_when_it_has_none(seeded_db, use_db):
+    """`update_transactions` writes the purpose too, so a careless move would blank it."""
+    import sqlite3
+
+    use_db(seeded_db)
+    backend = SqliteBackend()
+    charge, flag_id = _flagged(backend, 7)
+    with sqlite3.connect(backend.path) as connection:
+        connection.execute("UPDATE transactions SET purpose = NULL WHERE transactionid = ?", (charge,))
+    assert snapshot(backend, charge)["purpose"] is None
+
+    assert backend.move_flagged_charge(flag_id, 9, TREASURER).ok
+    assert snapshot(backend, charge)["purpose"] is None  # still none, not an empty string or a guess
+
+
+@pytest.mark.parametrize("destination", [7, 99999])
+def test_a_move_to_the_same_or_an_unknown_committee_is_refused_and_nothing_changes(destination, seeded_db, use_db):
+    use_db(seeded_db)
+    backend = SqliteBackend()
+    charge, flag_id = _flagged(backend, 7)
+    before = snapshot(backend, charge)
+
+    result = backend.move_flagged_charge(flag_id, destination, TREASURER)
+
+    assert result.error and not result.updated
+    assert snapshot(backend, charge) == before
+    assert backend.fetch_flags().iloc[0]["status"] == "open"
+
+
+def test_a_charge_that_moved_since_it_was_flagged_is_not_moved_again(seeded_db, use_db):
+    from ais_fmd.data.backend import TransactionChange
+
+    use_db(seeded_db)
+    backend = SqliteBackend()
+    charge, flag_id = _flagged(backend, 7)
+    purpose = snapshot(backend, charge)["purpose"]
+    assert backend.update_transactions([TransactionChange(charge, purpose, 12)], TREASURER).updated == 1
+
+    result = backend.move_flagged_charge(flag_id, 9, TREASURER)
+
+    assert result.error and "changed since it was flagged" in result.error
+    assert snapshot(backend, charge)["budget_category"] == 12  # untouched by the refused move
+    assert backend.fetch_flags().iloc[0]["status"] == "open"
+
+
+def test_a_charge_in_a_closed_term_cannot_be_moved_and_its_flag_stays_open(seeded_db, use_db):
+    use_db(seeded_db)
+    backend = SqliteBackend()
+    charge, flag_id = _flagged(backend, 7)
+    before = snapshot(backend, charge)
+
+    date = pd.Timestamp(before["transaction_date"])
+    terms = backend.fetch_terms()
+    term = terms[(pd.to_datetime(terms["start_date"]) <= date) & (date <= pd.to_datetime(terms["end_date"]))]
+    assert backend.set_term_lock(str(term.iloc[0]["TermID"]), True, TREASURER).ok
+
+    result = backend.move_flagged_charge(flag_id, 9, TREASURER)
+
+    assert result.error and "closed" in result.error
+    assert snapshot(backend, charge) == before
+    assert backend.fetch_flags().iloc[0]["status"] == "open"  # so it can be retried after reopening
+
+
+def test_a_flag_that_is_already_closed_cannot_move_anything(seeded_db, use_db):
+    use_db(seeded_db)
+    backend = SqliteBackend()
+    charge, flag_id = _flagged(backend, 7)
+    backend.resolve_flag(flag_id, "dismissed", TREASURER)
+    before = snapshot(backend, charge)
+
+    result = backend.move_flagged_charge(flag_id, 9, TREASURER)
+
+    assert result.unchanged == 1 and not result.error
+    assert snapshot(backend, charge) == before
+
+
+def test_a_charge_can_be_moved_to_a_ledger_bucket_not_only_a_committee(seeded_db, use_db):
+    """The treasurer may decide a disputed charge is a refund or a transfer."""
+    use_db(seeded_db)
+    backend = SqliteBackend()
+    charge, flag_id = _flagged(backend, 7)
+    assert backend.move_flagged_charge(flag_id, 17, TREASURER).ok  # 17 = Refunded
+    assert snapshot(backend, charge)["budget_category"] == 17
+
+
+def test_an_unknown_flag_is_refused(seeded_db, use_db):
+    use_db(seeded_db)
+    result = SqliteBackend().move_flagged_charge(424242, 9, TREASURER)
+    assert result.error and "does not exist" in result.error

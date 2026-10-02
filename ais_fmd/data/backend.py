@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 import pandas as pd
 
 from .. import settings
+from ..config.categories import COMMITTEE_BY_ID, committee_name
 
 
 def normalize_email(value: object) -> str:
@@ -242,6 +243,89 @@ class Backend(ABC):
 
     def resolve_flag(self, flag_id: int, status: str, actor: str, note: str = "") -> UpdateResult:
         return self._unsupported("Resolving a flag")
+
+    def move_flagged_charge(
+        self, flag_id: int, new_committee_id: int, actor: str, note: str = ""
+    ) -> UpdateResult:
+        """
+        The treasurer's verdict "this isn't theirs": move the charge to
+        `new_committee_id` and close the flag as resolved, as one decision.
+
+        Written once here, on top of methods every backend already implements, so
+        SQLite and Supabase both get it -- and with it the closed-period check and
+        the audit trail of `update_transactions`, which the move goes *through*
+        rather than around.
+
+        The order is deliberate. The charge is moved first and the flag closed
+        second, so the only way to fail halfway is "moved but the flag is still
+        open" (which the treasurer can simply close) -- never "flag closed but the
+        charge never moved". If the move is refused, the flag stays open.
+
+        Refuses, leaving everything as it was, when the flag is not open, the
+        destination is unknown or the same, or the charge has been moved since it
+        was flagged (the treasurer should then just close the flag).
+        """
+        result = UpdateResult()
+
+        flags = self.fetch_flags(None)
+        match = flags[flags["flag_id"] == int(flag_id)] if not flags.empty else flags
+        if match.empty:
+            result.error = f"Flag {flag_id} does not exist."
+            return result
+        flag = match.iloc[0]
+        if flag["status"] != "open":
+            result.unchanged = 1
+            return result
+
+        if int(new_committee_id) not in COMMITTEE_BY_ID:
+            result.error = f"Committee {new_committee_id} does not exist."
+            return result
+
+        charges = self.fetch_transactions()
+        charge = charges[charges["transactionid"] == int(flag["transaction_id"])]
+        if charge.empty:
+            result.error = f"Charge {flag['transaction_id']} does not exist."
+            return result
+        charge = charge.iloc[0]
+
+        booked_now = None if pd.isna(charge["budget_category"]) else int(charge["budget_category"])
+        flagged_from = None if pd.isna(flag["booked_to_committee_id"]) else int(flag["booked_to_committee_id"])
+        if booked_now != flagged_from:
+            result.error = (
+                "This charge has changed since it was flagged: it is now booked to "
+                f"{committee_name(booked_now) or 'no committee'}. Close the flag instead of moving it."
+            )
+            return result
+        if booked_now == int(new_committee_id):
+            result.error = f"It is already booked to {committee_name(booked_now)}."
+            return result
+
+        # `update_transactions` writes the purpose too, so pass the current one or
+        # it would be blanked.
+        purpose = None if pd.isna(charge["purpose"]) else str(charge["purpose"])
+        moved = self.update_transactions(
+            [
+                TransactionChange(
+                    transaction_id=int(flag["transaction_id"]),
+                    purpose=purpose,
+                    budget_category=int(new_committee_id),
+                )
+            ],
+            actor,
+        )
+        if moved.error or moved.failed:
+            result.error = moved.error or "The charge could not be moved."
+            return result  # nothing changed, so the flag stays open
+
+        summary = f"Moved from {committee_name(booked_now)} to {committee_name(int(new_committee_id))}."
+        closing = self.resolve_flag(int(flag_id), "resolved", actor, f"{summary} {note}".strip())
+        result.updated = 1  # the charge did move
+        if closing.error:
+            result.error = (
+                f"The charge was moved, but the flag could not be closed ({closing.error}). "
+                "Close it by hand."
+            )
+        return result
 
 
 def get_backend() -> Backend:

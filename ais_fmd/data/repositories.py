@@ -408,6 +408,16 @@ def resolve_flag(flag_id: int, status: str, actor: str, note: str = "") -> Updat
     return result
 
 
+def move_flagged_charge(
+    flag_id: int, new_committee_id: int, actor: str, note: str = ""
+) -> UpdateResult:
+    """The treasurer's "not theirs" verdict: move the charge and close the flag."""
+    result = backend().move_flagged_charge(flag_id, new_committee_id, actor, note)
+    if result.updated:
+        invalidate()  # every committee's totals changed, not just the flag list
+    return result
+
+
 def locked_semesters() -> set[str]:
     """Names of terms currently closed to edits."""
     terms = load_terms()

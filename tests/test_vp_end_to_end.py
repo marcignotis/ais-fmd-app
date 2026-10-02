@@ -39,6 +39,7 @@ from ais_fmd.domain import budgets as budget_domain
 from ais_fmd.domain import committee_report, exports, vp_history, vp_metrics
 from ais_fmd.domain.money import format_currency
 from ais_fmd.domain.terms import date_range_for_semester
+from ais_fmd.ui.flags import VERDICT_FIXED
 
 from tests.test_views import ROOT, TIMEOUT, VIEWS, assert_clean, seeded_db, use_db  # noqa: F401
 from tests.test_vp_access_chain import ORG_WIDE_PAGES, VP_PAGES, open_app, opens
@@ -350,8 +351,8 @@ def test_the_treasurer_sees_every_open_flag_and_can_close_one(demo_db):
         assert note in text, f"the treasurer cannot see: {note}"
 
     target = int(open_before.iloc[0]["flag_id"])
-    app.button(key=f"flag_resolve_{target}").click()
-    app.run()
+    app.radio(key=f"flag_verdict_{target}").set_value(VERDICT_FIXED).run()
+    app.button(key=f"flag_apply_{target}").click().run()
     assert_clean(app, "closing a flag")
     assert backend.fetch_flags().set_index("flag_id").loc[target, "status"] == "resolved"
 

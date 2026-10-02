@@ -5,8 +5,11 @@ The two sides of "This isn't ours".
 think belongs to another committee, and the list of what they have flagged and
 how the treasurer answered. `treasurer_panel` is what lands in the Review Queue.
 
-Neither changes a booking. A flag is a note; the treasurer decides where money is
-booked, using the normal pages, and then closes the flag.
+A flag by itself changes nothing: it is a note. Only the treasurer decides where
+money is booked. Their verdict on a flag is one of three things -- it is theirs and
+stays put, it is not theirs and moves to the committee they pick (the booking and the
+flag close together, through the normal edit path so closed terms and the audit trail
+still apply), or it was already fixed elsewhere and the flag just closes.
 
 Both are written to be added to an existing page with one call, because the pages
 they sit on are shared with other teams.
@@ -17,7 +20,12 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
-from ais_fmd.config.categories import committee_name
+from ais_fmd.config.categories import (
+    COMMITTEES,
+    committee_label,
+    committee_name,
+    parse_committee_label,
+)
 from ais_fmd.data import repositories as repo
 from ais_fmd.domain import flags as flags_domain
 from ais_fmd.domain.money import format_currency
@@ -29,6 +37,11 @@ _FLASH = "_flag_flash"
 # A VP picks from the most recent charges in their current view; the filters above
 # the table narrow it. Bounded so the list stays usable for a busy committee.
 MAX_CHOICES = 200
+
+# The treasurer's three possible verdicts on a flag.
+VERDICT_KEEP = "It's theirs: keep it where it is"
+VERDICT_MOVE = "It isn't theirs: move it to another committee"
+VERDICT_FIXED = "I already fixed it elsewhere: just close the flag"
 
 
 def load_flags_or_none(committee_ids: tuple[int, ...] | None) -> pd.DataFrame | None:
@@ -152,43 +165,14 @@ def treasurer_panel(transactions: pd.DataFrame, actor: str) -> None:
             shell.say("No VP has an open flag. Nothing to review here.", caption=True)
         else:
             shell.say(
-                "A VP says these charges belong to a different committee. Flagging "
-                "changed nothing. To move a charge, edit it on the Transactions page, "
-                "then mark the flag resolved here. If it is right as booked, keep it.",
+                "A VP says these charges belong to a different committee. Nothing has "
+                "changed yet. Decide each one: keep it where it is, or move it -- and "
+                "the booking changes right here, with the flag closed to match.",
                 caption=True,
             )
             detailed = flags_domain.with_charges(open_flags, transactions)
             for _, row in detailed.iterrows():
-                flag_id = int(row["flag_id"])
-                day = pd.Timestamp(row["transaction_date"]).date() if pd.notna(row["transaction_date"]) else "?"
-                with st.container(border=True):
-                    shell.say(
-                        f"**{day}** · {format_currency(row['amount'])} · booked to "
-                        f"**{committee_name(row['booked_to_committee_id']) or 'no committee'}**"
-                    )
-                    st.caption(str(row["details"] or "")[:140])
-                    shell.say(f"> {row['note']}")
-                    st.caption(f"Flagged by {row['flagged_by']}")
-                    reply = st.text_input(
-                        "Reply to the VP (optional)", key=f"flag_reply_{flag_id}",
-                        max_chars=flags_domain.MAX_NOTE_LENGTH,
-                    )
-                    resolve_column, keep_column = st.columns(2)
-                    outcome = None
-                    if resolve_column.button("Mark resolved", key=f"flag_resolve_{flag_id}"):
-                        outcome = flags_domain.RESOLVED
-                    if keep_column.button("Keep as booked", key=f"flag_dismiss_{flag_id}"):
-                        outcome = flags_domain.DISMISSED
-                    if outcome:
-                        result = repo.resolve_flag(flag_id, outcome, actor, reply)
-                        if result.error:
-                            shell.error_state("Could not update the flag", result.error)
-                        else:
-                            st.session_state[_FLASH] = (
-                                "Flag marked resolved." if outcome == flags_domain.RESOLVED
-                                else "Flag closed. The charge stays as booked."
-                            )
-                            st.rerun()
+                _treasurer_decision(row, actor)
 
         closed = flags[flags["status"] != flags_domain.OPEN] if not flags.empty else flags
         if not closed.empty:
@@ -207,3 +191,70 @@ def treasurer_panel(transactions: pd.DataFrame, actor: str) -> None:
                 ),
                 column_config={"Amount": st.column_config.NumberColumn(format="$%.2f")},
             )
+
+
+def _treasurer_decision(row: pd.Series, actor: str) -> None:
+    """One open flag: show the evidence, take the treasurer's verdict, and apply it."""
+    flag_id = int(row["flag_id"])
+    day = pd.Timestamp(row["transaction_date"]).date() if pd.notna(row["transaction_date"]) else "?"
+    current_id = None if pd.isna(row["budget_category"]) else int(row["budget_category"])
+    flagged_id = None if pd.isna(row["booked_to_committee_id"]) else int(row["booked_to_committee_id"])
+    current_name = committee_name(current_id) or "no committee"
+    moved_since = current_id != flagged_id
+
+    with st.container(border=True):
+        shell.say(f"**{day}** · {format_currency(row['amount'])} · booked to **{current_name}**")
+        st.caption(str(row["details"] or "")[:140])
+        shell.say(f"> {row['note']}")
+        st.caption(f"Flagged by {row['flagged_by']}")
+
+        if moved_since:
+            shell.notify(
+                "warning",
+                f"This charge has moved since it was flagged: it was in "
+                f"{committee_name(flagged_id) or 'no committee'} and is now in {current_name}. "
+                "It cannot be moved again from here; close the flag once you are satisfied.",
+            )
+        options = [VERDICT_KEEP, VERDICT_FIXED] if moved_since else [VERDICT_KEEP, VERDICT_MOVE, VERDICT_FIXED]
+        # No default: a verdict that moves money should be chosen, not left selected.
+        verdict = st.radio("Your decision", options, index=None, key=f"flag_verdict_{flag_id}")
+
+        destination = None
+        if verdict == VERDICT_MOVE:
+            choices = [committee_label(c.id) for c in COMMITTEES if c.id != current_id]
+            picked = st.selectbox(
+                "Move it to",
+                choices,
+                index=None,
+                placeholder="Choose a committee",
+                key=f"flag_dest_{flag_id}",
+            )
+            destination = parse_committee_label(picked) if picked else None
+
+        reply = st.text_input(
+            "Reply to the VP (optional)", key=f"flag_reply_{flag_id}",
+            max_chars=flags_domain.MAX_NOTE_LENGTH,
+        )
+
+        ready = verdict is not None and (verdict != VERDICT_MOVE or destination is not None)
+        if not st.button("Apply decision", type="primary", disabled=not ready, key=f"flag_apply_{flag_id}"):
+            return
+
+        if verdict == VERDICT_MOVE:
+            result = repo.move_flagged_charge(flag_id, destination, actor, reply)
+            done = f"Moved to {committee_name(destination)}. The flag is closed and every total has updated."
+        elif verdict == VERDICT_KEEP:
+            result = repo.resolve_flag(flag_id, flags_domain.DISMISSED, actor, reply)
+            done = f"Flag closed. The charge stays with {current_name}."
+        else:
+            result = repo.resolve_flag(flag_id, flags_domain.RESOLVED, actor, reply)
+            done = "Flag marked resolved."
+
+        if result.error:
+            # Left on screen. If the charge did move but the flag could not close, the
+            # next run shows the "moved since it was flagged" notice and the treasurer
+            # can simply close the flag.
+            shell.error_state("Could not apply that decision", result.error)
+        else:
+            st.session_state[_FLASH] = done
+            st.rerun()

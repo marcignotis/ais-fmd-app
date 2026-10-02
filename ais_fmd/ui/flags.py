@@ -20,6 +20,7 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
+from ais_fmd import auth
 from ais_fmd.config.categories import (
     COMMITTEES,
     committee_label,
@@ -237,7 +238,10 @@ def _treasurer_decision(row: pd.Series, actor: str) -> None:
         )
 
         ready = verdict is not None and (verdict != VERDICT_MOVE or destination is not None)
-        if not st.button("Apply decision", type="primary", disabled=not ready, key=f"flag_apply_{flag_id}"):
+        if not st.button(
+            "Apply decision", type="primary", key=f"flag_apply_{flag_id}",
+            disabled=not ready or auth.current_user().read_only,
+        ):
             return
 
         if verdict == VERDICT_MOVE:

@@ -108,6 +108,7 @@ PROFILES = [
     ("vp.marketing@sandbox.local", "officer", 9, "Demo VP (Marketing)"),
     ("vp.membership@sandbox.local", "officer", 5, "Demo VP (Membership)"),
     ("treasurer@sandbox.local", "treasurer", None, "Demo Treasurer"),
+    ("president@sandbox.local", "president", None, "Demo President"),
 ]
 
 # Sample "This isn't ours" flags so the Review Queue has something in it:
@@ -255,7 +256,7 @@ def main() -> int:
         if not result.ok:
             print(f"Could not add profile {email}: {result.error}")
             return 1
-    print(f"Added {len(PROFILES)} fake sign-in profiles (VPs and the treasurer).")
+    print(f"Added {len(PROFILES)} fake sign-in profiles (VPs, the treasurer and the president).")
 
     added_flags = _add_demo_flags(backend)
     print(f"Added {added_flags} sample flags for the Review Queue.")

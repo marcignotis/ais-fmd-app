@@ -36,6 +36,7 @@ from ais_fmd.ui import flags as flag_ui
 identity = auth.require(auth.Role.TREASURER)
 
 shell.environment_banner()
+auth.read_only_notice(identity)
 shell.page_header(
     "Review Queue",
     "Work through what the categorizer could not resolve. Purchases on a card "
@@ -356,7 +357,7 @@ with st.form("review_queue_form"):
         )
         st.markdown('<hr class="ais-rule" />', unsafe_allow_html=True)
 
-    submitted = st.form_submit_button("Apply decisions", type="primary")
+    submitted = st.form_submit_button("Apply decisions", type="primary", disabled=identity.read_only)
 
 if submitted:
     changes: list[TransactionChange] = []

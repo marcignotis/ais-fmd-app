@@ -35,6 +35,9 @@ class Role(IntEnum):
     MEMBER = 10
     OFFICER = 20
     TREASURER = 30
+    # Ranked above Treasurer so `can(TREASURER)` is true: the President sees every
+    # page the Treasurer does. What they cannot do is write -- see `Identity.read_only`.
+    PRESIDENT = 35
     ADMIN = 40
 
     @property
@@ -43,6 +46,7 @@ class Role(IntEnum):
             Role.MEMBER: "Member",
             Role.OFFICER: "Committee officer",
             Role.TREASURER: "Treasurer",
+            Role.PRESIDENT: "President",
             Role.ADMIN: "Admin",
         }[self]
 
@@ -51,6 +55,7 @@ ROLE_DESCRIPTIONS = {
     Role.MEMBER: "Read-only dashboards and reports.",
     Role.OFFICER: "Adds their own committee's detail and reimbursement requests.",
     Role.TREASURER: "Uploads statements, edits transactions, sets budgets.",
+    Role.PRESIDENT: "Sees everything the Treasurer sees, but cannot change anything.",
     Role.ADMIN: "Everything, plus data-quality and audit tooling.",
 }
 
@@ -65,6 +70,22 @@ class Identity:
 
     def can(self, required: Role) -> bool:
         return self.role >= required
+
+    @property
+    def read_only(self) -> bool:
+        """
+        True for the President: every page opens, nothing can be changed.
+
+        Pages show or hide their edit controls with `can_write`, and the write
+        functions in `data/repositories.py` refuse a read-only identity
+        themselves, so a page that forgets to check still cannot change data.
+        """
+        return self.role == Role.PRESIDENT
+
+    @property
+    def can_write(self) -> bool:
+        """Whether this identity may change transactions, budgets, terms or the roster."""
+        return self.role >= Role.TREASURER and not self.read_only
 
     @property
     def committee_scoped(self) -> bool:
@@ -264,6 +285,7 @@ _ROLE_BY_NAME: dict[str, Role] = {
     "member": Role.MEMBER,
     "officer": Role.OFFICER,
     "treasurer": Role.TREASURER,
+    "president": Role.PRESIDENT,
     "admin": Role.ADMIN,
 }
 
@@ -363,6 +385,29 @@ def require(required: Role) -> Identity:
         st.caption("Switch roles from the sidebar to explore this page.")
     st.stop()
     raise AssertionError("unreachable")  # pragma: no cover
+
+
+def refuse_read_only(identity: Identity) -> None:
+    """
+    Turn a read-only identity away from a page that exists only to change things.
+
+    Called straight after `require(...)`, which every page must do first.
+    """
+    if not identity.read_only:
+        return
+
+    st.warning(
+        f"**Read-only access.** You are signed in as **{identity.role.label}**. "
+        "This page only changes settings, so there is nothing here to view."
+    )
+    st.stop()
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
+def read_only_notice(identity: Identity) -> None:
+    """A one-line banner for pages a read-only identity can open but not change."""
+    if identity.read_only:
+        st.info("You are signed in as President: this page is read-only for you.", icon=":material/lock:")
 
 
 _DEMO_NONE = "—"

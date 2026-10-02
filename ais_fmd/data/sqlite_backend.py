@@ -782,7 +782,7 @@ class SqliteBackend(Backend):
         if not email:
             result.error = "An email is required."
             return result
-        if role not in {"member", "officer", "treasurer", "admin"}:
+        if role not in {"member", "officer", "treasurer", "president", "admin"}:
             result.error = f"Unknown role {role!r}."
             return result
         try:

@@ -32,6 +32,11 @@ from dataclasses import dataclass
 
 from .categories import committee_name
 
+# The President is not one of the six VP committees, but has their own budget line
+# ("President" in categories.py). Their profile carries it, so My Committee opens on
+# it; they can still pick any other committee, because they read everything.
+PRESIDENT_LINE_ID = 4
+
 
 @dataclass(frozen=True)
 class VpCommittee:

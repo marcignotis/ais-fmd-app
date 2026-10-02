@@ -499,6 +499,11 @@ def role_switcher() -> None:
             key="ais_committee_picker",
             help="Sandbox only. In production this comes from the VP's profile.",
         )
+    elif chosen == Role.PRESIDENT:
+        # The President's own budget line; their profile carries it in production.
+        from .config.vp_committees import PRESIDENT_LINE_ID
+
+        committee_id = PRESIDENT_LINE_ID
 
     if chosen != identity.role or committee_id != identity.committee_id:
         set_identity(Identity(email=identity.email, role=chosen, committee_id=committee_id))

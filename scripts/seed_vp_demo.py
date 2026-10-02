@@ -108,7 +108,7 @@ PROFILES = [
     ("vp.marketing@sandbox.local", "officer", 9, "Demo VP (Marketing)"),
     ("vp.membership@sandbox.local", "officer", 5, "Demo VP (Membership)"),
     ("treasurer@sandbox.local", "treasurer", None, "Demo Treasurer"),
-    ("president@sandbox.local", "president", None, "Demo President"),
+    ("president@sandbox.local", "president", 4, "Demo President"),
 ]
 
 # Sample "This isn't ours" flags so the Review Queue has something in it:

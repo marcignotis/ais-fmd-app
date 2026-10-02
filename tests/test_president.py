@@ -290,3 +290,18 @@ def test_the_sandbox_role_picker_offers_the_president(seeded_db, use_db):
     use_db(seeded_db)
     app = AppTest.from_file(str(ROOT / "app.py"), default_timeout=TIMEOUT).run()
     assert "President" in app.selectbox(key="ais_role_picker").options
+
+
+def test_the_president_has_their_own_budget_line_and_opens_on_it(seeded_db, use_db):
+    use_db(seeded_db)
+    from ais_fmd.config import vp_committees
+    from ais_fmd.config.categories import BUDGETED_COMMITTEE_IDS, committee_name
+
+    line = vp_committees.PRESIDENT_LINE_ID
+    assert committee_name(line) == "President" and line in BUDGETED_COMMITTEE_IDS
+
+    app = run_as(VIEWS / "Officer.py", PRESIDENT, line)
+    assert_clean(app, "My Committee as the President")
+    picker = next(box for box in app.selectbox if box.label == "Committee")
+    assert picker.value == "President"
+    assert "Consulting" in picker.options  # still free to look at the others

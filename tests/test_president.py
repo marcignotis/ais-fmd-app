@@ -305,3 +305,34 @@ def test_the_president_has_their_own_budget_line_and_opens_on_it(seeded_db, use_
     picker = next(box for box in app.selectbox if box.label == "Committee")
     assert picker.value == "President"
     assert "Consulting" in picker.options  # still free to look at the others
+
+
+# --- Navigation order ----------------------------------------------------------
+
+ORDERED_PAGES = [
+    ("ais_fmd/views/Home.py", "Home", "i", auth.Role.MEMBER),
+    ("ais_fmd/views/Dashboard.py", "Dashboard", "i", auth.Role.MEMBER),
+    ("ais_fmd/views/Transactions.py", "Transactions", "i", auth.Role.MEMBER),
+    ("ais_fmd/views/ReviewQueue.py", "Review Queue", "i", auth.Role.TREASURER),
+    ("ais_fmd/views/Officer.py", "My Committee", "i", auth.Role.OFFICER),
+    ("ais_fmd/views/Treasury.py", "Treasury", "i", auth.Role.TREASURER),
+]
+
+
+def _titles(identity):
+    return [page[1] for page in nav.visible_pages(identity, ORDERED_PAGES)]
+
+
+def test_the_president_sees_my_committee_right_under_the_dashboard():
+    assert _titles(_identity(PRESIDENT)) == [
+        "Home", "Dashboard", "My Committee", "Transactions", "Review Queue", "Treasury",
+    ]
+
+
+def test_moving_my_committee_loses_and_adds_no_pages():
+    president = nav.visible_pages(_identity(PRESIDENT), ORDERED_PAGES)
+    assert sorted(president) == sorted(ORDERED_PAGES)
+
+
+def test_the_treasurer_keeps_the_original_order():
+    assert nav.visible_pages(_identity(auth.Role.TREASURER), ORDERED_PAGES) == ORDERED_PAGES

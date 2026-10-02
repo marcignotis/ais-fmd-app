@@ -16,6 +16,9 @@ from __future__ import annotations
 
 from .auth import Identity, Role
 
+DASHBOARD_PATH = "ais_fmd/views/Dashboard.py"
+MY_COMMITTEE_PATH = "ais_fmd/views/Officer.py"
+
 # (path, title, icon, minimum role) -- the same shape as `PAGES` in app.py.
 VP_PAGES: list[tuple[str, str, str, Role]] = [
     ("ais_fmd/views/Home.py", "Home", ":material/home:", Role.MEMBER),
@@ -29,4 +32,23 @@ def visible_pages(
 ) -> list[tuple[str, str, str, Role]]:
     """The pages `identity` may see: the VP set for a VP, else `pages` filtered by role."""
     source = VP_PAGES if identity.committee_scoped else pages
-    return [page for page in source if identity.can(page[3])]
+    visible = [page for page in source if identity.can(page[3])]
+    if identity.read_only:
+        visible = _my_committee_after_dashboard(visible)
+    return visible
+
+
+def _my_committee_after_dashboard(
+    pages: list[tuple[str, str, str, Role]],
+) -> list[tuple[str, str, str, Role]]:
+    """
+    The President's own budget is the first thing they look at after the org-wide
+    Dashboard, so My Committee sits directly under it. Only the order changes.
+    """
+    mine = [page for page in pages if page[0] == MY_COMMITTEE_PATH]
+    dashboard = [i for i, page in enumerate(pages) if page[0] == DASHBOARD_PATH]
+    if not mine or not dashboard:
+        return pages
+    rest = [page for page in pages if page[0] != MY_COMMITTEE_PATH]
+    at = next(i for i, page in enumerate(rest) if page[0] == DASHBOARD_PATH) + 1
+    return rest[:at] + mine + rest[at:]

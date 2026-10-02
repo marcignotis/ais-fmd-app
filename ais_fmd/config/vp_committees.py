@@ -14,6 +14,11 @@ budget, so confirm it before real VPs sign in. Each entry says how sure it is.
 Not listed on purpose:
   * Finance (Treasury, line 2) -- the treasurer's own full view, not a VP page.
   * Operations -- no budget line is obviously theirs yet; awaiting the treasurer.
+  * Passport (line 16) -- treated as outside the six committees. A VP never sees
+    its transactions; only the treasurer does. Unconfirmed.
+
+No committee currently owns more than one line, but the roll-up (a committee that
+adds several lines together) is kept and tested, for the day one does.
 A committee that is not listed falls back to showing just its own single line,
 exactly as before, so an unmapped VP still sees something correct.
 
@@ -47,10 +52,11 @@ VP_COMMITTEES: tuple[VpCommittee, ...] = (
     VpCommittee("Consulting", (7,)),
     # Marketing is an exact match. Merch (13) may belong here too -- unconfirmed.
     VpCommittee("Marketing", (9,)),
-    # Membership is an exact match. Passport (16) is included because the
-    # International Involvement Chair, a Membership role, runs the passport
-    # program. Meeting Food, Road Trip and Formal may also belong -- unconfirmed.
-    VpCommittee("Membership", (5, 16)),
+    # Membership is an exact match and owns only its own line. Passport (16) was
+    # first assumed to belong here (a Membership chair runs the passport program),
+    # but it is treated as OUTSIDE the six committees, so no VP sees it.
+    # Meeting Food, Road Trip and Formal may belong to a committee -- unconfirmed.
+    VpCommittee("Membership", (5,)),
 )
 
 

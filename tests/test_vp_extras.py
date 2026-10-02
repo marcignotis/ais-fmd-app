@@ -9,6 +9,7 @@ is free text, so it is escaped in the HTML and neutralised in the CSV.
 
 from __future__ import annotations
 
+import html
 from datetime import datetime
 
 import pandas as pd
@@ -23,7 +24,7 @@ from ais_fmd.ui import committee_charts
 
 # Fixtures and helpers shared with the other VP tests.
 from tests.test_views import seeded_db, use_db  # noqa: F401
-from tests.test_vp_portal import membership_db  # noqa: F401
+from tests.test_vp_portal import membership_db, two_line_committee  # noqa: F401
 
 GENERATED = datetime(2026, 10, 1, 9, 30)
 
@@ -169,18 +170,43 @@ def test_the_report_holds_only_the_committees_own_lines(membership_db):
     report = committee_report.build_for_committee(
         transactions, budgets, terms, 5, "Fall 2026", generated=GENERATED
     )
-    assert "Membership" in report and "Passport" in report
+    assert "Membership" in report
     leaked = [detail for detail in foreign_details if detail in report]
     assert not leaked, f"another committee's charge appeared in the report: {leaked[:2]}"
+
+
+def test_the_membership_report_never_includes_passport(membership_db):
+    """Passport is outside the committees: its name and its charges stay out of a VP's report."""
+    transactions, budgets, terms = _ledger_frames()
+    passport_charges = set(transactions[transactions["budget_category"] == 16]["details"].dropna())
+    assert passport_charges, "the fixture should have put charges on the Passport line"
+    report = committee_report.build_for_committee(
+        transactions, budgets, terms, 5, "Fall 2026", generated=GENERATED
+    )
+    assert "Passport" not in report
+    assert not [d for d in passport_charges if html.escape(d[:90]) in report]
 
 
 def test_the_report_figures_match_the_page(membership_db):
     transactions, budgets, terms = _ledger_frames()
     summary = budget_domain.budget_vs_actual(transactions, budgets, terms, "Fall 2026")
+    position = vp_metrics.rollup(summary, ["Membership"])
+    report = committee_report.build_for_committee(
+        transactions, budgets, terms, 5, "Fall 2026", generated=GENERATED
+    )
+    assert format_currency(position["budget"]) in report
+    assert format_currency(position["spent"]) in report
+
+
+def test_a_two_line_committee_report_adds_its_lines_together(membership_db, two_line_committee):
+    """The roll-up still works for a committee that owns several lines."""
+    transactions, budgets, terms = _ledger_frames()
+    summary = budget_domain.budget_vs_actual(transactions, budgets, terms, "Fall 2026")
     position = vp_metrics.rollup(summary, ["Membership", "Passport"])
     report = committee_report.build_for_committee(
-        transactions, budgets, terms, 16, "Fall 2026", generated=GENERATED  # via the Passport line
+        transactions, budgets, terms, 16, "Fall 2026", generated=GENERATED  # via the second line
     )
+    assert "Membership" in report and "Passport" in report
     assert format_currency(position["budget"]) in report
     assert format_currency(position["spent"]) in report
 

@@ -12,7 +12,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from ais_fmd.domain import vp_history, vp_metrics
+from ais_fmd.domain import vp_history
 
 TERMS = pd.DataFrame(
     {

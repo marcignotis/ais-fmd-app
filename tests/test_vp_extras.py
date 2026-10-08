@@ -1,4 +1,4 @@
-﻿"""
+"""
 The data-freshness line, the spend-vs-pace chart, the CSV download and the
 printable committee report.
 

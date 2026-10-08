@@ -26,7 +26,6 @@ import pytest
 import streamlit as st
 
 from ais_fmd import auth
-from ais_fmd.config import vp_committees
 from ais_fmd.data import repositories
 from ais_fmd.data.sqlite_backend import SqliteBackend
 from ais_fmd.domain import committee_report, vp_metrics

@@ -1,4 +1,4 @@
-﻿"""
+"""
 "This isn't ours": the VP and treasurer pages.
 
 The data rules (who can flag what, that flagging never changes a charge) are tested
@@ -7,8 +7,6 @@ a VP flagging a charge, and the treasurer seeing and closing it in the Review Qu
 """
 
 from __future__ import annotations
-
-import pytest
 
 from ais_fmd import auth
 from ais_fmd.data.backend import TransactionChange

@@ -37,6 +37,17 @@ from .categories import committee_name
 # it; they can still pick any other committee, because they read everything.
 PRESIDENT_LINE_ID = 4
 
+# "Projected burn" on My Committee says when the money runs out at the pace so far.
+# It is a straight-line average over the whole term, which misreads a committee whose
+# spending comes in lumps (a big event, an early purchase), so it is switched on
+# committee by committee rather than for everyone. Membership only, for now.
+PROJECTED_BURN_LINE_IDS: tuple[int, ...] = (5,)
+
+
+def shows_projected_burn(line_ids: tuple[int, ...]) -> bool:
+    """Whether a committee owning these budget lines gets the Projected burn panel."""
+    return any(int(line) in PROJECTED_BURN_LINE_IDS for line in line_ids)
+
 
 @dataclass(frozen=True)
 class VpCommittee:

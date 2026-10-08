@@ -40,6 +40,7 @@ from ais_fmd.domain.terms import (
     previous_semester,
 )
 from ais_fmd.ui import charts, committee_charts, shell, theme
+from ais_fmd.ui import flags as flag_ui
 
 identity = auth.require(auth.Role.OFFICER)
 
@@ -145,7 +146,6 @@ position = vp_metrics.rollup(summary, line_names)
 percent = position["percent"]
 status = vp_metrics.status_for(percent, position["spent"])
 
-totals = budget_domain.semester_totals(mine, bundle.terms, semester)
 prior = previous_semester(bundle.terms, semester)
 prior_totals = (
     budget_domain.semester_totals(mine, bundle.terms, prior)
@@ -224,40 +224,73 @@ st.download_button(
 
 st.markdown('<hr class="ais-rule" />', unsafe_allow_html=True)
 
-# --- Budget health -----------------------------------------------------------
+# --- Updates on flagged charges ----------------------------------------------
+#
+# What happened to charges this committee flagged, and any charge the treasurer
+# moved INTO it. Directly under the budget numbers, which is where a moved
+# charge shows up. Nothing draws when there is nothing to say.
 
-st.subheader("Budget health")
+flag_ui.updates_panel(
+    flag_ui.load_flags_or_none(line_ids),
+    flag_ui.load_arrivals_or_none(line_ids),
+    bundle.transactions,
+    line_ids,
+)
 
-over = lines[lines["Status"] == "over"]
-approaching = lines[lines["Status"] == "approaching"]
-banner_parts = []
-if len(over):
-    banner_parts.append(shell.pill(f"{len(over)} over budget", "over"))
-if len(approaching):
-    banner_parts.append(shell.pill(f"{len(approaching)} approaching", "approaching"))
-if banner_parts:
-    st.markdown(" &nbsp; ".join(banner_parts), unsafe_allow_html=True)
+# --- Where the money went ----------------------------------------------------
+#
+# Sits directly under the headline numbers: the first question after "how much is
+# left" is "where did it go". The older per-line bullet chart and the by-purpose
+# bars were dropped from this page; the waterfall already shows the biggest
+# kinds of spending against the budget.
 
-if len(line_names) > 1:
-    chart_column, table_column = st.columns([1, 1])
-    with chart_column:
-        shell.chart(charts.budget_bullet(lines), key="committee_bullet")
-    with table_column:
-        by_line = lines.rename(columns={"Committee_Name": "Budget line"})
-        by_line["% Spent"] = by_line["% Spent"].map(
-            lambda value: "—" if value is None or value != value else f"{value:.1f}%"
-        )
-        shell.dataframe(
-            by_line[["Budget line", "Budget", "Spent", "% Spent", "Status"]],
-            column_config={
-                "Budget": st.column_config.NumberColumn(format="$%.2f"),
-                "Spent": st.column_config.NumberColumn(format="$%.2f"),
-                "% Spent": st.column_config.TextColumn(width="small"),
-                "Status": st.column_config.TextColumn(width="small"),
-            },
-        )
+st.subheader("Where the money went")
+
+expense_split = budget_domain.categorize_flow(scoped, budget_domain.EXPENSE)
+income_split = budget_domain.categorize_flow(scoped, budget_domain.INCOME)
+
+if expense_split.empty:
+    shell.empty_state("Nothing spent yet", f"No charges are booked to {chosen_name} in {semester}.")
 else:
-    shell.chart(charts.budget_bullet(lines), key="committee_bullet")
+    labels, values, measures = vp_metrics.budget_flow(expense_split, position["budget"])
+    shell.chart(
+        charts.waterfall(labels, values, measures, title=f"{semester} budget flow"),
+        key="committee_flow",
+    )
+    shell.say(
+        "Your budget, less your five biggest kinds of spending; everything else is "
+        "grouped as Other. What is left is your remaining balance.",
+        caption=True,
+    )
+
+# A committee that owns several budget lines keeps a per-line breakdown. None do
+# today, so this is invisible until one does.
+if len(line_names) > 1:
+    by_line = lines.rename(columns={"Committee_Name": "Budget line"})
+    by_line["% Spent"] = by_line["% Spent"].map(
+        lambda value: "—" if value is None or value != value else f"{value:.1f}%"
+    )
+    shell.dataframe(
+        by_line[["Budget line", "Budget", "Spent", "% Spent", "Status"]],
+        column_config={
+            "Budget": st.column_config.NumberColumn(format="$%.2f"),
+            "Spent": st.column_config.NumberColumn(format="$%.2f"),
+            "% Spent": st.column_config.TextColumn(width="small"),
+            "Status": st.column_config.TextColumn(width="small"),
+        },
+    )
+
+if not income_split.empty:
+    st.markdown("#### Money received")
+    shell.chart(
+        charts.ranked_bar(
+            income_split,
+            label_column="Category",
+            value_column="Amount",
+            color=theme.active().income,
+        ),
+        key="committee_income_split",
+    )
 
 st.markdown('<hr class="ais-rule" />', unsafe_allow_html=True)
 
@@ -316,130 +349,54 @@ if past_terms is not None:
 
 st.markdown('<hr class="ais-rule" />', unsafe_allow_html=True)
 
-# --- Where the money went ----------------------------------------------------
-
-st.subheader("Where the money went")
-
-expense_split = budget_domain.categorize_flow(scoped, budget_domain.EXPENSE)
-income_split = budget_domain.categorize_flow(scoped, budget_domain.INCOME)
-
-if expense_split.empty:
-    shell.empty_state("Nothing spent yet", f"No charges are booked to {chosen_name} in {semester}.")
-else:
-    labels, values, measures = vp_metrics.budget_flow(expense_split, position["budget"])
-    shell.chart(
-        charts.waterfall(labels, values, measures, title=f"{semester} budget flow"),
-        key="committee_flow",
-    )
-    shell.say(
-        "Your budget, less your five biggest kinds of spending; everything else is "
-        "grouped as Other. What is left is your remaining balance.",
-        caption=True,
-    )
-
-    if income_split.empty:
-        st.markdown("#### Spending by purpose")
-        shell.chart(
-            charts.ranked_bar(
-                expense_split,
-                label_column="Category",
-                value_column="Amount",
-                color=theme.active().expense,
-            ),
-            key="committee_expense_split",
-        )
-    else:
-        expense_column, income_column = st.columns([1, 1])
-        with expense_column:
-            st.markdown("#### Spending by purpose")
-            shell.chart(
-                charts.ranked_bar(
-                    expense_split,
-                    label_column="Category",
-                    value_column="Amount",
-                    color=theme.active().expense,
-                ),
-                key="committee_expense_split",
-            )
-        with income_column:
-            st.markdown("#### Money received")
-            shell.chart(
-                charts.ranked_bar(
-                    income_split,
-                    label_column="Category",
-                    value_column="Amount",
-                    color=theme.active().income,
-                ),
-                key="committee_income_split",
-            )
-
-st.markdown('<hr class="ais-rule" />', unsafe_allow_html=True)
-
 # --- Trend and burn rate -----------------------------------------------------
 
 st.subheader("Across semesters")
 
-trend_column, burn_column = st.columns([3, 2])
+# Projected burn is shown for some committees only (see `vp_committees`). Everyone
+# else gets the semester chart at full width.
+show_burn = vp_committees.shows_projected_burn(line_ids)
+if show_burn:
+    trend_column, burn_column = st.columns([3, 2])
+else:
+    trend_column, burn_column = st.container(), None
 
 with trend_column:
     history = vp_metrics.historical(mine, bundle.budgets, bundle.terms, line_names)
     shell.chart(charts.trend_bars(history), key="committee_trend")
 
-with burn_column:
-    st.markdown("**Projected burn**")
-    burn = budget_domain.burn_rate_projection(
-        transactions, bundle.budgets, bundle.terms, semester
-    )
-    burn = burn[burn["Committee_Name"].isin(line_names)]
-    at_risk = burn[
-        burn["Note"].isin({"Projected to exhaust before term end", "Already over budget"})
-    ]
-    if at_risk.empty:
-        shell.empty_state(
-            "Nothing projected to overrun",
-            "You finish within budget at the current pace.",
+if burn_column is not None:
+    with burn_column:
+        st.markdown("**Projected burn**")
+        burn = budget_domain.burn_rate_projection(
+            transactions, bundle.budgets, bundle.terms, semester
         )
-    else:
-        compact = at_risk.copy()
-        compact["Risk"] = compact["Note"].map(
-            lambda note: "Over budget" if note == "Already over budget" else "Will exhaust"
-        )
-        shell.dataframe(
-            compact[["Committee_Name", "Daily Burn", "Projected Exhaustion", "Risk"]].rename(
-                columns={"Committee_Name": "Budget line", "Daily Burn": "Per day"}
-            ),
-            column_config={
-                "Per day": st.column_config.NumberColumn(format="$%.2f"),
-                "Projected Exhaustion": st.column_config.DateColumn(format="MMM D, YYYY"),
-                "Risk": st.column_config.TextColumn(width="small"),
-            },
-        )
+        burn = burn[burn["Committee_Name"].isin(line_names)]
+        at_risk = burn[
+            burn["Note"].isin({"Projected to exhaust before term end", "Already over budget"})
+        ]
+        if at_risk.empty:
+            shell.empty_state(
+                "Nothing projected to overrun",
+                "You finish within budget at the current pace.",
+            )
+        else:
+            compact = at_risk.copy()
+            compact["Risk"] = compact["Note"].map(
+                lambda note: "Over budget" if note == "Already over budget" else "Will exhaust"
+            )
+            shell.dataframe(
+                compact[["Committee_Name", "Daily Burn", "Projected Exhaustion", "Risk"]].rename(
+                    columns={"Committee_Name": "Budget line", "Daily Burn": "Per day"}
+                ),
+                column_config={
+                    "Per day": st.column_config.NumberColumn(format="$%.2f"),
+                    "Projected Exhaustion": st.column_config.DateColumn(format="MMM D, YYYY"),
+                    "Risk": st.column_config.TextColumn(width="small"),
+                },
+            )
 
 st.markdown('<hr class="ais-rule" />', unsafe_allow_html=True)
-
-# --- Recent charges ----------------------------------------------------------
-
-st.subheader("Recent charges")
-
-if scoped.empty:
-    shell.empty_state("Nothing recorded against this committee yet")
-else:
-    recent = scoped.sort_values("transaction_date", ascending=False).head(8)
-    table = pd.DataFrame(
-        {
-            "Date": pd.to_datetime(recent["transaction_date"]).dt.date,
-            "Amount": recent["amount"],
-            "Purpose": recent["purpose"].fillna("—"),
-            "Details": recent["details"].astype(str).str.slice(0, 70),
-        }
-    )
-    if len(line_ids) > 1:
-        table.insert(1, "Line", recent["budget_category"].map(committee_name))
-    shell.dataframe(
-        table,
-        column_config={"Amount": st.column_config.NumberColumn(format="$%.2f")},
-    )
-    st.caption(f"Latest {len(recent)} of {len(scoped)}. The full list is on My Transactions.")
 
 # --- Reimbursements ----------------------------------------------------------
 #

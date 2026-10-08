@@ -228,6 +228,52 @@ class Backend(ABC):
         """All flags, or with `committee_ids` only those on charges booked to them."""
         return pd.DataFrame()
 
+    def fetch_flags_moved_into(self, committee_ids: tuple[int, ...]) -> pd.DataFrame:
+        """
+        Charges the treasurer moved INTO these budget lines because another
+        committee flagged them -- so the receiving VP is told, and the charge
+        does not just appear in their totals unexplained.
+
+        Written once here, on top of two methods every backend already has, so
+        SQLite and Supabase both get it.
+
+        What comes back is deliberately only the charge (date, amount, details,
+        purpose) and when it was decided. Not who flagged it, not their note, not
+        the treasurer's reply (which names the committee it came from), and not
+        the line it was moved out of: those belong to another committee, and the
+        caller here is one VP, so they are dropped in this layer rather than
+        trusting a page to hide them.
+        """
+        columns = [
+            "flag_id", "transaction_id", "resolved_at",
+            "transaction_date", "amount", "details", "purpose",
+        ]
+        empty = pd.DataFrame(columns=columns)
+        ids = {int(committee_id) for committee_id in committee_ids}
+        if not ids:
+            return empty
+
+        flags = self.fetch_flags(None)
+        if flags is None or flags.empty:
+            return empty
+        decided = flags[
+            (flags["status"] == "resolved") & ~flags["booked_to_committee_id"].isin(ids)
+        ]
+        if decided.empty:
+            return empty
+
+        charges = self.fetch_transactions()
+        if charges is None or charges.empty:
+            return empty
+        here = charges[charges["budget_category"].isin(ids)][
+            ["transactionid", "transaction_date", "amount", "details", "purpose"]
+        ]
+        moved = decided.merge(here, left_on="transaction_id", right_on="transactionid", how="inner")
+        if moved.empty:
+            return empty
+        moved = moved.sort_values("resolved_at", ascending=False).drop_duplicates("transaction_id")
+        return moved[columns].reset_index(drop=True)
+
     def create_flag(
         self,
         transaction_id: int,

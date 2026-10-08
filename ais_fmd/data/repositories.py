@@ -449,6 +449,20 @@ def load_flags(committee_ids: tuple[int, ...] | None = None) -> pd.DataFrame:
     return _flags(data_version(), scope)
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def _flags_moved_into(version: int, committee_ids: tuple[int, ...]) -> pd.DataFrame:
+    return backend().fetch_flags_moved_into(committee_ids)
+
+
+def load_flags_moved_into(committee_ids: tuple[int, ...]) -> pd.DataFrame:
+    """
+    Charges moved into these budget lines after another committee flagged them.
+    Only the charge comes back, never who flagged it or where it came from (see
+    `Backend.fetch_flags_moved_into`).
+    """
+    return _flags_moved_into(data_version(), tuple(int(i) for i in committee_ids))
+
+
 @_blocked_when_read_only(_update_refusal)
 def create_flag(
     transaction_id: int, allowed_committee_ids: tuple[int, ...], note: str, actor: str

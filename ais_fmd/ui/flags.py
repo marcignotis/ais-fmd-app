@@ -69,6 +69,64 @@ def _charge_label(row: pd.Series) -> str:
     return f"{day}  ·  {format_currency(row['amount'])}  ·  {details}"
 
 
+# --- The VP's side: updates on My Committee -------------------------------------
+
+# How many updates to list at once. The rest are on My Transactions.
+MAX_UPDATES = 5
+
+_LEVEL = {
+    flags_domain.PENDING: "info",
+    flags_domain.MOVED_OUT: "success",
+    flags_domain.KEPT: "info",
+    flags_domain.CLOSED: "info",
+    flags_domain.ARRIVED: "success",
+}
+
+
+def load_arrivals_or_none(committee_ids: tuple[int, ...]) -> pd.DataFrame | None:
+    """Charges moved into these lines after a flag, or None if flags cannot be stored here."""
+    try:
+        return repo.load_flags_moved_into(committee_ids)
+    except Exception:  # noqa: BLE001 - a missing table is a deployment state, not an error
+        return None
+
+
+def updates_panel(
+    own_flags: pd.DataFrame | None,
+    arrivals: pd.DataFrame | None,
+    transactions: pd.DataFrame,
+    line_ids: tuple[int, ...],
+) -> None:
+    """
+    Tell a committee what happened to the charges it flagged, and which charges
+    were moved in. Draws nothing when there is nothing to say, so a committee with
+    no flag activity sees no empty box.
+    """
+    if own_flags is None and arrivals is None:
+        return  # this deployment cannot store flags yet
+    updates = flags_domain.notifications(
+        own_flags, arrivals, transactions, line_ids, today=pd.Timestamp.today().normalize()
+    )
+    if updates.empty:
+        return
+
+    st.subheader("Updates")
+    for _, update in updates.head(MAX_UPDATES).iterrows():
+        day = pd.Timestamp(update["transaction_date"]).strftime("%b %d, %Y")
+        charge = f"{day}  ·  {format_currency(update['amount'])}  ·  {str(update['details'])[:48]}"
+        lines = [f"**{update['headline']}**", charge]
+        if update["reply"]:
+            lines.append(f"Treasurer: {update['reply']}")
+        text = "  \n".join(lines)  # two spaces + newline = a line break in markdown
+        shell.notify(_LEVEL[update["kind"]], text)
+    if len(updates) > MAX_UPDATES:
+        st.caption(
+            f"Showing the latest {MAX_UPDATES} of {len(updates)}. "
+            "Everything is on My Transactions."
+        )
+    st.markdown('<hr class="ais-rule" />', unsafe_allow_html=True)
+
+
 # --- The VP's side --------------------------------------------------------------
 
 

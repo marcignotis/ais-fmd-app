@@ -80,3 +80,120 @@ def with_charges(flags: pd.DataFrame, transactions: pd.DataFrame) -> pd.DataFram
         ["transactionid", "transaction_date", "amount", "details", "budget_category", "purpose"]
     ].rename(columns={"transactionid": "transaction_id"})
     return flags.merge(charges, on="transaction_id", how="left")
+
+
+# --- What a VP is told about flagged charges ------------------------------------
+#
+# A VP flags a charge, and later the treasurer decides. Without a message the VP
+# only finds out by opening a table on another page, and a charge that was moved
+# *into* their committee just appears in their totals with no explanation. These
+# rules turn flags into a short list of things worth saying on My Committee.
+
+UPDATE_WINDOW_DAYS = 30
+
+PENDING = "pending"
+MOVED_OUT = "moved_out"
+KEPT = "kept"
+CLOSED = "closed"
+ARRIVED = "arrived"
+
+HEADLINES = {
+    PENDING: "Waiting on the treasurer",
+    MOVED_OUT: "Moved out of your committee",
+    KEPT: "The treasurer kept it with your committee",
+    CLOSED: "Closed by the treasurer; still booked to you",
+    ARRIVED: "Moved into your committee",
+}
+
+NOTIFICATION_COLUMNS = [
+    "when", "kind", "headline", "transaction_date", "amount", "details", "reply",
+]
+
+
+def _moment(series: pd.Series) -> pd.Series:
+    """Timestamps from either database, as naive datetimes (so they compare)."""
+    return pd.to_datetime(series, errors="coerce", utc=True).dt.tz_localize(None)
+
+
+def _clean(value: object) -> str:
+    return "" if value is None or (isinstance(value, float) and pd.isna(value)) else str(value)
+
+
+def notifications(
+    own_flags: pd.DataFrame | None,
+    arrivals: pd.DataFrame | None,
+    transactions: pd.DataFrame,
+    line_ids: tuple[int, ...],
+    *,
+    today: pd.Timestamp,
+    window_days: int = UPDATE_WINDOW_DAYS,
+) -> pd.DataFrame:
+    """
+    Things worth telling a committee about, newest first.
+
+    `own_flags` are flags this committee raised (so the VP already knows the
+    charge). Each says where it stands: waiting, moved out, kept, or closed with
+    the charge still theirs -- the last two derived from where the charge is
+    booked *now*, not from the wording of a note.
+
+    `arrivals` are charges the treasurer moved *into* this committee because
+    someone else flagged them. They carry only the charge itself: who flagged
+    it, why, and which committee it came from are not passed in, so they cannot
+    be shown.
+
+    A waiting flag stays until it is answered. Answered ones drop off after
+    `window_days`, so the list says what is new rather than growing forever.
+    """
+    ids = {int(i) for i in line_ids}
+    cutoff = today - pd.Timedelta(days=window_days)
+    rows: list[dict] = []
+
+    for _, flag in with_charges(
+        own_flags if own_flags is not None else pd.DataFrame(), transactions
+    ).iterrows():
+        status = str(flag["status"])
+        if status == OPEN:
+            when = _moment(pd.Series([flag["flagged_at"]])).iloc[0]
+            kind = PENDING
+        else:
+            when = _moment(pd.Series([flag["resolved_at"]])).iloc[0]
+            if pd.isna(when) or when < cutoff:
+                continue
+            if status == DISMISSED:
+                kind = KEPT
+            else:
+                booked = flag["budget_category"]
+                still_here = not pd.isna(booked) and int(booked) in ids
+                kind = CLOSED if still_here else MOVED_OUT
+        rows.append(
+            {
+                "when": when,
+                "kind": kind,
+                "transaction_date": flag["transaction_date"],
+                "amount": flag["amount"],
+                "details": _clean(flag["details"]),
+                "reply": _clean(flag.get("resolution_note")),
+            }
+        )
+
+    if arrivals is not None and not arrivals.empty:
+        for _, charge in arrivals.iterrows():
+            when = _moment(pd.Series([charge["resolved_at"]])).iloc[0]
+            if pd.isna(when) or when < cutoff:
+                continue
+            rows.append(
+                {
+                    "when": when,
+                    "kind": ARRIVED,
+                    "transaction_date": charge["transaction_date"],
+                    "amount": charge["amount"],
+                    "details": _clean(charge["details"]),
+                    "reply": "",
+                }
+            )
+
+    if not rows:
+        return pd.DataFrame(columns=NOTIFICATION_COLUMNS)
+    frame = pd.DataFrame(rows)
+    frame["headline"] = frame["kind"].map(HEADLINES)
+    return frame.sort_values("when", ascending=False).reset_index(drop=True)[NOTIFICATION_COLUMNS]

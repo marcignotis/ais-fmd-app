@@ -454,20 +454,3 @@ def test_my_committee_renders_for_every_committee(committee_id, seeded_db, use_d
     use_db(seeded_db)
     app = run_as(VIEWS / "Officer.py", OFFICER, committee_id)
     assert_clean(app, f"My Committee as the {committee_name(committee_id)} VP")
-
-
-def test_recent_charges_show_only_the_committees_own_lines(membership_db, two_line_committee):
-    app = run_as(VIEWS / "Officer.py", OFFICER, 5)
-    assert_clean(app, "My Committee as the Membership VP")
-    recent = next(
-        (element.value for element in app.dataframe if {"Date", "Line"} <= set(element.value.columns)),
-        None,
-    )
-    assert recent is not None, "a two-line committee with charges should list them"
-    assert set(recent["Line"]) <= {"Membership", "Passport"}
-    owned = {(row[0], row[1]) for row in _committee_rows(5)}
-    shown = {
-        (str(pd.Timestamp(date).date()), round(float(amount), 2))
-        for date, amount in zip(recent["Date"], recent["Amount"])
-    }
-    assert shown <= owned, "a charge from outside the committee's lines was listed"

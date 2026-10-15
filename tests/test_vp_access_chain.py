@@ -27,9 +27,9 @@ from tests.test_views import ROOT, TIMEOUT, VIEWS, assert_clean, seeded_db, use_
 from tests.test_vp_portal import _committee_rows, membership_db  # noqa: F401
 
 VIEW = "ais_fmd/views/{}.py"
-VP_PAGES = ["Home", "Officer", "MyTransactions"]
+VP_PAGES = ["Home", "Officer", "MyTransactions", "Assistant"]
 ORG_WIDE_PAGES = [
-    "Dashboard", "Transactions", "Dues", "Reports", "Reconciliation", "Assistant",
+    "Dashboard", "Transactions", "Dues", "Reports", "Reconciliation",
     "Runbook", "Treasury", "ReviewQueue", "Roster", "Planner", "DataQuality", "AuditLog",
 ]
 
@@ -124,7 +124,7 @@ def test_removing_a_profile_removes_the_way_in(seeded_db, use_db):
 # --- Which pages open ------------------------------------------------------------
 
 
-def test_a_vp_reaches_exactly_their_three_pages_and_no_org_wide_page(membership_db):
+def test_a_vp_reaches_exactly_their_own_pages_and_no_other_org_wide_page(membership_db):
     app = open_app(sign_in("vp@sandbox.local", role="officer", committee_id=9))
     assert_clean(app, "app.py as the Marketing VP")
     for page in VP_PAGES:

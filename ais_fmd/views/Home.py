@@ -97,6 +97,7 @@ if identity.committee_scoped:
 | --- | --- |
 | **My Committee** | Your budget, spending and reimbursements |
 | **My Transactions** | Every charge and deposit booked to your committee |
+| **Assistant** | Ask questions about the data in plain language |
 """
     )
 else:

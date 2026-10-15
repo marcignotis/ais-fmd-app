@@ -61,10 +61,10 @@ FULL_PAGES = [
 ]
 
 
-def test_a_vp_gets_exactly_three_pages():
+def test_a_vp_gets_exactly_these_pages_with_the_assistant_last():
     vp = auth.Identity(email="vp@x.edu", role=OFFICER, committee_id=8)
     titles = [page[1] for page in nav.visible_pages(vp, FULL_PAGES)]
-    assert titles == ["Home", "My Committee", "My Transactions"]
+    assert titles == ["Home", "My Committee", "My Transactions", "Assistant"]
 
 
 def test_a_vp_never_gets_a_page_that_shows_every_committee():

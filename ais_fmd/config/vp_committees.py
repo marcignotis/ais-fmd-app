@@ -73,6 +73,11 @@ VP_COMMITTEES: tuple[VpCommittee, ...] = (
     # but it is treated as OUTSIDE the six committees, so no VP sees it.
     # Meeting Food, Road Trip and Formal may belong to a committee -- unconfirmed.
     VpCommittee("Membership", (5,)),
+    # Corporate Relations is an exact name match and owns only its own line. In the
+    # sandbox seed every sponsorship deposit is booked to this line, so its "Money
+    # received" shows sponsorship income; whether real bookings do the same is the
+    # treasurer's call, not something this file decides.
+    VpCommittee("Corporate Relations", (6,)),
 )
 
 

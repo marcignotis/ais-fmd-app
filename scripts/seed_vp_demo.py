@@ -15,7 +15,8 @@ numbers or amounts from any statement. It refuses to run outside the sandbox.
 
     .venv\\Scripts\\python scripts/seed_vp_demo.py
 
-Safe to run twice (the second run says it was already loaded). "Reset & reseed
+Safe to run twice: a second run only adds what is missing (a newly listed
+committee, a new profile) and never repeats what is already there. "Reset & reseed
 data" in the sidebar wipes it along with everything else; run this again after.
 Restart Streamlit afterwards, or wait a few minutes for its cache to expire.
 """
@@ -55,6 +56,7 @@ TARGET_SHARE = {
     10: {"FA24": 0.50, "SP25": 0.65, "FA25": 0.55, "SP26": 0.70, "FA26": 0.45},  # Professional Development: on track
     7: {"FA24": 0.40, "SP25": 0.55, "FA25": 0.50, "SP26": 0.90, "FA26": 0.60},   # Consulting
     9: {"FA24": 0.60, "SP25": 0.45, "FA25": 0.50, "SP26": 0.70, "FA26": 0.50},   # Marketing (already over in Fall 2026)
+    6: {"FA24": 0.50, "SP25": 0.65, "FA25": 0.58, "SP26": 0.72, "FA26": 0.66},   # Corporate Relations
 }
 
 # (purpose, weight, vendor names). Invented vendors only.
@@ -84,6 +86,11 @@ SPENDING = {
         ("Merch", 0.30, ["EMBROIDERY SHOP GNV", "STICKER PRINTER"]),
         ("Technology", 0.20, ["WEBSITE HOSTING", "DESIGN TOOL SUBSCRIPTION"]),
     ],
+    6: [
+        ("Professional Events", 0.45, ["SPONSOR MIXER VENUE", "COMPANY SITE VISIT TRANSPORT"]),
+        ("Food & Drink", 0.35, ["SPONSOR APPRECIATION LUNCH", "PARTNER COFFEE MEETING"]),
+        ("Misc.", 0.20, ["THANK YOU CARDS PRINTING", "SPONSOR PACKET PRINTING"]),
+    ],
 }
 
 # Money coming back in, so "Money received" has something to show:
@@ -107,6 +114,7 @@ PROFILES = [
     ("vp.consulting@sandbox.local", "officer", 7, "Demo VP (Consulting)"),
     ("vp.marketing@sandbox.local", "officer", 9, "Demo VP (Marketing)"),
     ("vp.membership@sandbox.local", "officer", 5, "Demo VP (Membership)"),
+    ("vp.corporate-relations@sandbox.local", "officer", 6, "Demo VP (Corporate Relations)"),
     ("treasurer@sandbox.local", "treasurer", None, "Demo Treasurer"),
     ("president@sandbox.local", "president", 4, "Demo President"),
 ]
@@ -141,11 +149,25 @@ def _split(total: float, parts: int, rng: random.Random) -> list[float]:
     return amounts
 
 
-def build_records(terms: dict[str, tuple[date, date]], budgets: dict, spent: dict) -> list[dict]:
+def build_records(
+    terms: dict[str, tuple[date, date]],
+    budgets: dict,
+    spent: dict,
+    lines: tuple[int, ...] | None = None,
+) -> list[dict]:
+    """
+    Spending (and, on a full run, a few incoming deposits) for the demo committees.
+
+    `lines` limits it to some committees, for adding a newly listed one to a database
+    that is already seeded. The incoming deposits are skipped then: they are one-off
+    rows for the original committees and would otherwise be added a second time.
+    """
     rng = random.Random(20261001)
     records: list[dict] = []
 
     for line, shares in TARGET_SHARE.items():
+        if lines is not None and line not in lines:
+            continue
         for term_id in TERM_IDS:
             if term_id not in terms:
                 continue
@@ -180,7 +202,7 @@ def build_records(terms: dict[str, tuple[date, date]], budgets: dict, spent: dic
                     )
 
     for line, purpose, details, amount, term_id in INCOMING:
-        if term_id not in terms:
+        if lines is not None or term_id not in terms:
             continue
         start, end = terms[term_id]
         end = min(end, LATEST_DATA_DAY)
@@ -208,9 +230,21 @@ def main() -> int:
     backend = SqliteBackend()
 
     uploaded = backend.fetch_uploaded_files()
-    if not uploaded.empty and FILE_NAME in set(uploaded["file_name"]):
-        print(f"{FILE_NAME} is already loaded. Reset & reseed data first to start over.")
-        return 0
+    already_loaded = not uploaded.empty and FILE_NAME in set(uploaded["file_name"])
+
+    # A second run never repeats what is there. It adds a committee that was listed
+    # after the first run (it has no demo rows yet) and makes sure every profile
+    # exists, so a newly added VP can sign in without wiping the sandbox.
+    only_lines: tuple[int, ...] | None = None
+    if already_loaded:
+        existing = backend.fetch_transactions()
+        seeded = set()
+        if not existing.empty and "source_file" in existing.columns:
+            demo_rows = existing[existing["source_file"] == FILE_NAME]
+            seeded = {int(line) for line in demo_rows["budget_category"].dropna()}
+        only_lines = tuple(line for line in TARGET_SHARE if line not in seeded)
+        if not only_lines:
+            return _ensure_profiles(backend, "already loaded; nothing new to add")
 
     terms_frame = backend.fetch_terms()
     budgets_frame = backend.fetch_budgets()
@@ -240,27 +274,36 @@ def main() -> int:
                 spent[key] = spent.get(key, 0.0) + abs(float(row["amount"]))
                 break
 
-    records = assign_natural_keys(build_records(terms, budgets, spent))
+    records = assign_natural_keys(build_records(terms, budgets, spent, only_lines))
     receipt = backend.insert_transactions(records, FILE_NAME, ACTOR)
     if not receipt.ok:
         print(f"Could not load the demo data: {receipt.error}")
         return 1
 
     print(f"Added {receipt.inserted} fake transactions ({receipt.duplicates_skipped} duplicates skipped).")
-    for line in TARGET_SHARE:
+    for line in only_lines or TARGET_SHARE:
         added = sum(1 for record in records if record["budget_category"] == line)
         print(f"  {committee_name(line):<26} +{added} rows")
 
+    status = _ensure_profiles(backend, "")
+    if status:
+        return status
+    if not already_loaded:
+        added_flags = _add_demo_flags(backend)
+        print(f"Added {added_flags} sample flags for the Review Queue.")
+    print("Restart Streamlit to see them straight away.")
+    return 0
+
+
+def _ensure_profiles(backend: SqliteBackend, note: str) -> int:
+    """Create or refresh every fake sign-in profile. Safe to repeat."""
     for email, role, line, name in PROFILES:
         result = backend.upsert_profile(email, role, line, name, ACTOR)
         if not result.ok:
             print(f"Could not add profile {email}: {result.error}")
             return 1
-    print(f"Added {len(PROFILES)} fake sign-in profiles (VPs, the treasurer and the president).")
-
-    added_flags = _add_demo_flags(backend)
-    print(f"Added {added_flags} sample flags for the Review Queue.")
-    print("Restart Streamlit to see them straight away.")
+    suffix = f" ({note})" if note else ""
+    print(f"{len(PROFILES)} fake sign-in profiles in place (VPs, the treasurer and the president){suffix}.")
     return 0
 
 

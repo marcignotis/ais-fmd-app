@@ -3,10 +3,11 @@ Which pages a signed-in person can navigate to.
 
 A VP (an Officer, see `Identity.committee_scoped`) gets four pages: the org-wide
 Home for context, their own committee's dashboard, their own committee's
-transactions, and the Assistant (see the note on `VP_PAGES`). Everything else -- including pages that are open to
-any role, like the org-wide Dashboard and Transactions -- is left out of their
-navigation, and Streamlit only serves pages that are in the navigation, so a
-page that is not listed cannot be reached by typing its URL either.
+transactions, and the Assistant (see the note on `VP_PAGES`). Everything else --
+including pages that are open to any role, like the org-wide Dashboard and
+Transactions -- is left out of their navigation, and Streamlit only serves pages
+that are in the navigation, so a page that is not listed cannot be reached by
+typing its URL either.
 
 Kept out of `app.py` so it can be tested without running the whole app, and so
 edits to the full `PAGES` list there do not conflict with edits here.

@@ -11,7 +11,6 @@ Everything here is the invented sandbox data; all emails are `@sandbox.local`.
 
 from __future__ import annotations
 
-import os
 import shutil
 import sqlite3
 

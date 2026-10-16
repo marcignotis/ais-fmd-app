@@ -21,7 +21,8 @@ from typing import Iterator
 import pandas as pd
 
 from .. import settings
-from .backend import Backend, TransactionChange, UpdateResult, UploadReceipt
+from ..domain import flags as flags_domain
+from .backend import Backend, TransactionChange, UpdateResult, UploadReceipt, normalize_email
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS committees (
@@ -140,6 +141,31 @@ CREATE TABLE IF NOT EXISTS reimbursements (
 );
 
 CREATE INDEX IF NOT EXISTS ix_reimbursements_status ON reimbursements (status);
+
+-- "This isn't ours": a VP disputing a charge booked to their committee. A flag is
+-- a note to the treasurer and never changes the booking itself. `booked_to` is
+-- the committee line the charge sat in when it was flagged, which is what scopes
+-- a VP's view of their own flags even if the treasurer later moves the charge.
+CREATE TABLE IF NOT EXISTS transaction_flags (
+    flag_id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    transaction_id         INTEGER NOT NULL,
+    booked_to_committee_id INTEGER,
+    flagged_by             TEXT NOT NULL,
+    note                   TEXT NOT NULL,
+    status                 TEXT NOT NULL DEFAULT 'open',
+    flagged_at             TEXT DEFAULT CURRENT_TIMESTAMP,
+    resolved_at            TEXT,
+    resolved_by            TEXT,
+    resolution_note        TEXT,
+    FOREIGN KEY (transaction_id) REFERENCES transactions (transactionid)
+);
+
+CREATE INDEX IF NOT EXISTS ix_flags_status ON transaction_flags (status);
+
+-- At most one open flag per charge, so a double-click or a second VP click cannot
+-- stack duplicates in the treasurer's queue.
+CREATE UNIQUE INDEX IF NOT EXISTS ux_flags_one_open
+    ON transaction_flags (transaction_id) WHERE status = 'open';
 
 -- Module M9: receipt capture.
 CREATE TABLE IF NOT EXISTS receipts (
@@ -317,6 +343,17 @@ class SqliteBackend(Backend):
                 ("locked_by", "TEXT"),
                 ("dues_rates", "TEXT"),
                 ("dues_rates_verified", "INTEGER NOT NULL DEFAULT 0"),
+                # Sponsorship dollar goal for the term. NULL = no goal set yet,
+                # distinct from 0 (a goal of literally $0), same reasoning as
+                # dues_rates being nullable above.
+                ("sponsorship_goal", "REAL"),
+            ],
+            "transactions": [
+                # Who a sponsorship deposit was actually from. Free text: bank
+                # descriptions never carry a company name (just "DEPOSIT
+                # CORPORATE SPONSORSHIP REF12345"), so this has to be typed in
+                # by whoever reconciles the deposit, not parsed from anything.
+                ("sponsor_name", "TEXT"),
             ],
         }
         for table, columns in additions.items():
@@ -421,6 +458,234 @@ class SqliteBackend(Backend):
                     field=term_id,
                     old_value=f"{previous or '(none)'}{'' if was_verified else ' (unconfirmed)'}",
                     new_value=f"{rates or '(none)'}{'' if verified else ' (unconfirmed)'}",
+                )
+                connection.commit()
+                result.updated = 1
+        except sqlite3.Error as exc:
+            result.error = f"{type(exc).__name__}: {exc}"
+        return result
+
+    def set_term_sponsorship_goal(
+        self, term_id: str, goal: float | None, actor: str
+    ) -> UpdateResult:
+        """
+        Record the sponsorship dollar goal for a term.
+
+        `goal=None` clears it (shows as "no goal set" rather than "$0 goal" --
+        those mean different things to a treasurer). Audited the same way as
+        `set_term_dues_rates`: this is a number a committee will be measured
+        against, so who set it and what it replaced both need to survive.
+        """
+        result = UpdateResult()
+        try:
+            with self._connect() as connection:
+                row = connection.execute(
+                    "SELECT sponsorship_goal FROM terms WHERE TermID = ?", (term_id,)
+                ).fetchone()
+                if row is None:
+                    result.error = f"Term {term_id} does not exist."
+                    return result
+
+                previous = row["sponsorship_goal"]
+                if (previous is None and goal is None) or (
+                    previous is not None and goal is not None and float(previous) == float(goal)
+                ):
+                    result.unchanged = 1
+                    return result
+
+                connection.execute(
+                    "UPDATE terms SET sponsorship_goal = ? WHERE TermID = ?",
+                    (goal, term_id),
+                )
+                self._audit(
+                    connection,
+                    transaction_id=None,
+                    action="sponsorship_goal",
+                    actor=actor,
+                    field=term_id,
+                    old_value="(none)" if previous is None else f"${previous:,.2f}",
+                    new_value="(none)" if goal is None else f"${goal:,.2f}",
+                )
+                connection.commit()
+                result.updated = 1
+        except sqlite3.Error as exc:
+            result.error = f"{type(exc).__name__}: {exc}"
+        return result
+
+    def set_transaction_sponsor_name(
+        self, transaction_id: int, sponsor_name: str | None, actor: str
+    ) -> UpdateResult:
+        """
+        Record who a sponsorship transaction was actually from.
+
+        Same M10 period-locking rule as `update_transactions`: a closed
+        term's transactions are read-only, and this is an edit to a
+        transaction like any other, so it is refused the same way rather
+        than quietly bypassing the lock through a side door.
+        """
+        result = UpdateResult()
+        try:
+            with self._connect() as connection:
+                row = connection.execute(
+                    "SELECT sponsor_name, transaction_date FROM transactions "
+                    "WHERE transactionid = ?",
+                    (transaction_id,),
+                ).fetchone()
+                if row is None:
+                    result.failed.append(transaction_id)
+                    result.error = f"Transaction {transaction_id} does not exist."
+                    return result
+
+                locked = self._locked_ranges(connection)
+                closed = self._locked_term_for(row["transaction_date"], locked)
+                if closed:
+                    result.failed.append(transaction_id)
+                    result.error = (
+                        f"This transaction falls in {closed}, which is closed. "
+                        f"Reopen the term before editing it."
+                    )
+                    return result
+
+                previous = row["sponsor_name"]
+                cleaned = (sponsor_name or "").strip() or None
+                if (previous or None) == cleaned:
+                    result.unchanged = 1
+                    return result
+
+                connection.execute(
+                    "UPDATE transactions SET sponsor_name = ? WHERE transactionid = ?",
+                    (cleaned, transaction_id),
+                )
+                self._audit(
+                    connection,
+                    transaction_id=transaction_id,
+                    action="update",
+                    actor=actor,
+                    field="sponsor_name",
+                    old_value=previous,
+                    new_value=cleaned,
+                )
+                connection.commit()
+                result.updated = 1
+        except sqlite3.Error as exc:
+            result.error = f"{type(exc).__name__}: {exc}"
+        return result
+
+    # --- "This isn't ours" flags ---------------------------------------------
+
+    def fetch_flags(self, committee_ids: tuple[int, ...] | None = None) -> pd.DataFrame:
+        """
+        Flags, open ones first. With `committee_ids`, only flags on charges that
+        were booked to those committee lines -- what a VP is allowed to see.
+        """
+        order = "ORDER BY CASE status WHEN 'open' THEN 0 ELSE 1 END, flag_id DESC"
+        if committee_ids is None:
+            return self._read(f"SELECT * FROM transaction_flags {order}")
+        ids = [int(committee_id) for committee_id in committee_ids]
+        if not ids:
+            return pd.DataFrame()
+        marks = ",".join("?" for _ in ids)
+        return self._read(
+            f"SELECT * FROM transaction_flags WHERE booked_to_committee_id IN ({marks}) {order}",
+            tuple(ids),
+        )
+
+    def create_flag(
+        self,
+        transaction_id: int,
+        allowed_committee_ids: tuple[int, ...],
+        note: str,
+        actor: str,
+    ) -> UpdateResult:
+        """
+        Flag one charge as not belonging to the caller's committee.
+
+        `allowed_committee_ids` is every budget line the caller owns. The check
+        that the charge really is booked to one of them lives here, not only in
+        the page, so a hand-made request for another committee's charge is
+        refused at the data layer. Nothing about the charge itself is changed.
+        """
+        result = UpdateResult()
+        cleaned, problem = flags_domain.clean_note(note)
+        if problem:
+            result.error = problem
+            return result
+
+        allowed = {int(committee_id) for committee_id in allowed_committee_ids}
+        try:
+            with self._connect() as connection:
+                row = connection.execute(
+                    "SELECT budget_category FROM transactions WHERE transactionid = ?",
+                    (int(transaction_id),),
+                ).fetchone()
+                if row is None:
+                    result.error = f"Charge {transaction_id} does not exist."
+                    return result
+                booked_to = row["budget_category"]
+                if booked_to is None or int(booked_to) not in allowed:
+                    result.error = "That charge is not booked to your committee, so you cannot flag it."
+                    return result
+
+                already = connection.execute(
+                    "SELECT 1 FROM transaction_flags WHERE transaction_id = ? AND status = 'open'",
+                    (int(transaction_id),),
+                ).fetchone()
+                if already:
+                    result.unchanged = 1
+                    return result
+
+                connection.execute(
+                    "INSERT INTO transaction_flags "
+                    "(transaction_id, booked_to_committee_id, flagged_by, note) "
+                    "VALUES (?, ?, ?, ?)",
+                    (int(transaction_id), int(booked_to), actor, cleaned),
+                )
+                self._audit(
+                    connection,
+                    transaction_id=int(transaction_id),
+                    action="flag",
+                    actor=actor,
+                    field="not our charge",
+                    new_value=cleaned[:120],
+                )
+                connection.commit()
+                result.updated = 1
+        except sqlite3.Error as exc:
+            result.error = f"{type(exc).__name__}: {exc}"
+        return result
+
+    def resolve_flag(self, flag_id: int, status: str, actor: str, note: str = "") -> UpdateResult:
+        """Close an open flag as resolved or dismissed. The treasurer's call."""
+        result = UpdateResult()
+        if status not in flags_domain.CLOSING_STATUSES:
+            result.error = f"Unknown status {status!r}."
+            return result
+        try:
+            with self._connect() as connection:
+                row = connection.execute(
+                    "SELECT status, transaction_id FROM transaction_flags WHERE flag_id = ?",
+                    (int(flag_id),),
+                ).fetchone()
+                if row is None:
+                    result.error = f"Flag {flag_id} does not exist."
+                    return result
+                if row["status"] != flags_domain.OPEN:
+                    result.unchanged = 1
+                    return result
+
+                connection.execute(
+                    "UPDATE transaction_flags SET status = ?, resolved_at = CURRENT_TIMESTAMP, "
+                    "resolved_by = ?, resolution_note = ? WHERE flag_id = ? AND status = 'open'",
+                    (status, actor, (note or "").strip() or None, int(flag_id)),
+                )
+                self._audit(
+                    connection,
+                    transaction_id=int(row["transaction_id"]),
+                    action="flag_resolved",
+                    actor=actor,
+                    field=f"flag {flag_id}",
+                    old_value=flags_domain.OPEN,
+                    new_value=status,
                 )
                 connection.commit()
                 result.updated = 1
@@ -630,11 +895,11 @@ class SqliteBackend(Backend):
         rather than a plain write.
         """
         result = UpdateResult()
-        email = (email or "").strip()
+        email = normalize_email(email)  # stored lowercase, like the Supabase backend
         if not email:
             result.error = "An email is required."
             return result
-        if role not in {"member", "officer", "treasurer", "admin"}:
+        if role not in {"member", "officer", "treasurer", "president", "admin"}:
             result.error = f"Unknown role {role!r}."
             return result
         try:
@@ -1198,6 +1463,7 @@ class SqliteBackend(Backend):
         """Drop everything and rebuild. Sandbox convenience, no production analogue."""
         with self._connect() as connection:
             tables = [
+                "transaction_flags",  # before transactions, which it references
                 "receipts", "reimbursements", "transaction_audit", "statement_balances",
                 "merchants", "uploaded_files", "transactions", "committeebudgets",
                 "terms", "committees",

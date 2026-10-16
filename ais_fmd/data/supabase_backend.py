@@ -24,11 +24,13 @@ ever opens a Postgres session and `auth.uid()` is always NULL. See the long note
 on `profiles` in migrations/002_deferred_features.sql. Authorization is
 application-level, in `auth.require(...)`, on every page.
 
-What that leaves is worth stating plainly rather than implying otherwise: reads
-go through the anon key and writes through the service key, so the database
-grants no protection of its own. Enabling RLS with no permissive policy -- so
-the service key, which bypasses RLS by design, is the only way in -- is the
-control that would, and it is not applied yet.
+So the database protects itself the only way this architecture allows: every
+read and write goes through the service (secret) key, and migration
+008_lock_down.sql enables RLS with no permissive policy and revokes the RPCs
+from anon/authenticated. The service key bypasses RLS by design, so it is the
+only way in. The publishable key is no longer used -- after 008 it can read
+nothing, and a read through it would silently return zero rows rather than
+fail, which is why no code path is left that could fall back to it.
 """
 
 from __future__ import annotations
@@ -38,7 +40,8 @@ from datetime import datetime, timezone
 import pandas as pd
 
 from .. import settings
-from .backend import Backend, TransactionChange, UpdateResult, UploadReceipt
+from ..domain import flags as flags_domain
+from .backend import Backend, TransactionChange, UpdateResult, UploadReceipt, normalize_email
 
 PAGE_SIZE = 1000
 
@@ -103,35 +106,22 @@ class SupabaseBackend(Backend):
             return ""
 
         self._url = _config("SUPABASE_URL", "url", required=True)
-        self._anon_key = _config(
-            "SUPABASE_ANON_KEY", "publishable_key", "anon_key", "key", required=True
-        )
         self._service_key = _config(
-            "SUPABASE_SERVICE_KEY", "secret_key", "service_key"
+            "SUPABASE_SERVICE_KEY", "secret_key", "service_key", required=True
         )
-        self._anon_client = None
         self._admin_client = None
 
     # --- clients -------------------------------------------------------------
     #
-    # Built once per backend instance and reused. These were previously bare
-    # `@property` methods calling `create_client()` on *every* access, so a page
-    # doing ten reads opened ten HTTP clients and ten TLS handshakes. The
-    # backend object itself is cached per process by `repositories.backend()`,
-    # which is safe precisely because it holds no user identity.
-
-    @property
-    def _anon(self):
-        """Identity-free client. Safe to share; holds no session."""
-        if self._anon_client is None:
-            self._anon_client = self._create_client(self._url, self._anon_key)
-        return self._anon_client
+    # Built once per backend instance and reused. This was previously a bare
+    # `@property` calling `create_client()` on *every* access, so a page doing
+    # ten reads opened ten HTTP clients and ten TLS handshakes. The backend
+    # object itself is cached per process by `repositories.backend()`, which is
+    # safe precisely because it holds no user identity.
 
     @property
     def _admin(self):
         """Service-key client. Bypasses RLS -- server-side only, never exposed."""
-        if not self._service_key:
-            raise RuntimeError("SUPABASE_SERVICE_KEY is not configured.")
         if self._admin_client is None:
             self._admin_client = self._create_client(self._url, self._service_key)
         return self._admin_client
@@ -145,7 +135,7 @@ class SupabaseBackend(Backend):
         The original loop issued one extra request whenever the row count was an
         exact multiple of the page size; stopping on a short page avoids that.
         """
-        client = self._anon
+        client = self._admin
         rows: list[dict] = []
         offset = 0
         while True:
@@ -186,7 +176,7 @@ class SupabaseBackend(Backend):
 
     def fetch_audit(self, limit: int = 500) -> pd.DataFrame:
         response = (
-            self._anon.table("transaction_audit")
+            self._admin.table("transaction_audit")
             .select("*")
             .order("audit_id", desc=True)
             .limit(limit)
@@ -211,7 +201,7 @@ class SupabaseBackend(Backend):
         a chapter's outstanding reimbursements, not a transaction ledger.
         """
         response = (
-            self._anon.table("reimbursements")
+            self._admin.table("reimbursements")
             .select("*")
             .order("submitted_at", desc=True)
             .execute()
@@ -225,7 +215,7 @@ class SupabaseBackend(Backend):
 
     def fetch_receipts(self) -> pd.DataFrame:
         response = (
-            self._anon.table("receipts")
+            self._admin.table("receipts")
             .select("*")
             .order("uploaded_at", desc=True)
             .execute()
@@ -233,7 +223,7 @@ class SupabaseBackend(Backend):
         return pd.DataFrame(response.data or [])
 
     def fetch_members(self, term_id: str | None = None) -> pd.DataFrame:
-        query = self._anon.table("members").select("*")
+        query = self._admin.table("members").select("*")
         if term_id:
             query = query.eq("term_id", term_id).order("full_name")
         else:
@@ -242,7 +232,7 @@ class SupabaseBackend(Backend):
 
     def fetch_profiles(self) -> pd.DataFrame:
         response = (
-            self._anon.table("profiles")
+            self._admin.table("profiles")
             .select("*")
             .order("committee_id")
             .order("display_name")
@@ -254,17 +244,20 @@ class SupabaseBackend(Backend):
         """
         One person's access record, or None on a miss.
 
-        `ilike` rather than `eq` for the same reason `sqlite_backend.py` uses
-        `lower(email) = lower(?)`: Google's identity token capitalises an email
-        however the account was originally typed, which does not always match
-        how a treasurer typed it into `profiles`.
+        Matched with `eq` on the normalized (lowercase) email, which is also how
+        `upsert_profile` stores it. This used to be `ilike`, but in a LIKE
+        pattern `_` and `%` are wildcards and `_` is common in real addresses --
+        `a_b@x.edu` matched `a.b@x.edu`, so a lookup that decides who gets in as
+        which committee could land on a different person's row (and, with
+        `maybe_single`, error out when it matched two).
         """
-        if not email:
+        key = normalize_email(email)
+        if not key:
             return None
         response = (
-            self._anon.table("profiles")
+            self._admin.table("profiles")
             .select("*")
-            .ilike("email", email)
+            .eq("email", key)
             .maybe_single()
             .execute()
         )
@@ -350,7 +343,7 @@ class SupabaseBackend(Backend):
             return result
         try:
             existing = (
-                self._anon.table("reimbursements")
+                self._admin.table("reimbursements")
                 .select("status")
                 .eq("request_id", request_id)
                 .maybe_single()
@@ -448,7 +441,7 @@ class SupabaseBackend(Backend):
         result = UpdateResult()
         try:
             existing = (
-                self._anon.table("terms")
+                self._admin.table("terms")
                 .select("Semester,locked")
                 .eq("TermID", term_id)
                 .maybe_single()
@@ -483,7 +476,7 @@ class SupabaseBackend(Backend):
         result = UpdateResult()
         try:
             existing = (
-                self._anon.table("terms")
+                self._admin.table("terms")
                 .select("dues_rates,dues_rates_verified")
                 .eq("TermID", term_id)
                 .maybe_single()
@@ -508,6 +501,100 @@ class SupabaseBackend(Backend):
                 field=term_id,
                 old_value=previous,
                 new_value=rates,
+            )
+            result.updated = 1
+        except Exception as exc:  # noqa: BLE001
+            result.error = f"{type(exc).__name__}: {exc}"
+        return result
+
+    # --- Sponsorship (M20). Needs migrations/012_sponsorship.sql. ------------
+
+    def set_term_sponsorship_goal(
+        self, term_id: str, goal: float | None, actor: str
+    ) -> UpdateResult:
+        """Same contract as `SqliteBackend.set_term_sponsorship_goal`: None clears it."""
+        result = UpdateResult()
+        try:
+            existing = (
+                self._admin.table("terms")
+                .select("sponsorship_goal")
+                .eq("TermID", term_id)
+                .maybe_single()
+                .execute()
+            )
+            if existing is None or existing.data is None:
+                result.error = f"Term {term_id} does not exist."
+                return result
+            previous = existing.data.get("sponsorship_goal")
+            if (previous is None and goal is None) or (
+                previous is not None and goal is not None and float(previous) == float(goal)
+            ):
+                result.unchanged = 1
+                return result
+
+            self._admin.table("terms").update({"sponsorship_goal": goal}).eq("TermID", term_id).execute()
+            self._audit(
+                transaction_id=None,
+                action="sponsorship_goal",
+                actor=actor,
+                field=term_id,
+                old_value="(none)" if previous is None else f"${float(previous):,.2f}",
+                new_value="(none)" if goal is None else f"${goal:,.2f}",
+            )
+            result.updated = 1
+        except Exception as exc:  # noqa: BLE001
+            result.error = f"{type(exc).__name__}: {exc}"
+        return result
+
+    def set_transaction_sponsor_name(
+        self, transaction_id: int, sponsor_name: str | None, actor: str
+    ) -> UpdateResult:
+        """
+        Same contract as `SqliteBackend.set_transaction_sponsor_name`, including
+        the closed-term refusal: `locked_term_for` (migration 003) is the same
+        check `apply_transaction_edits` uses, so this is not a side door.
+        """
+        result = UpdateResult()
+        try:
+            existing = (
+                self._admin.table("transactions")
+                .select("sponsor_name,transaction_date")
+                .eq("transactionid", int(transaction_id))
+                .maybe_single()
+                .execute()
+            )
+            if existing is None or existing.data is None:
+                result.failed.append(transaction_id)
+                result.error = f"Transaction {transaction_id} does not exist."
+                return result
+
+            closed = self._admin.rpc(
+                "locked_term_for", {"p_date": existing.data.get("transaction_date")}
+            ).execute().data
+            if closed:
+                result.failed.append(transaction_id)
+                result.error = (
+                    f"This transaction falls in {closed}, which is closed. "
+                    f"Reopen the term before editing it."
+                )
+                return result
+
+            previous = existing.data.get("sponsor_name")
+            cleaned = (sponsor_name or "").strip() or None
+            if (previous or None) == cleaned:
+                result.unchanged = 1
+                return result
+
+            self._admin.table("transactions").update({"sponsor_name": cleaned}).eq(
+                "transactionid", int(transaction_id)
+            ).execute()
+            self._audit(
+                transaction_id=int(transaction_id),
+                action="update",
+                actor=actor,
+                field="sponsor_name",
+                old_value=previous,
+                new_value=cleaned,
             )
             result.updated = 1
         except Exception as exc:  # noqa: BLE001
@@ -618,7 +705,7 @@ class SupabaseBackend(Backend):
             return result
         try:
             existing = (
-                self._anon.table("members")
+                self._admin.table("members")
                 .select("alt_keys")
                 .eq("term_id", term_id)
                 .eq("match_key", match_key)
@@ -654,11 +741,11 @@ class SupabaseBackend(Backend):
         actor: str,
     ) -> UpdateResult:
         result = UpdateResult()
-        email = (email or "").strip()
+        email = normalize_email(email)
         if not email:
             result.error = "An email is required."
             return result
-        if role not in {"member", "officer", "treasurer", "admin"}:
+        if role not in {"member", "officer", "treasurer", "president", "admin"}:
             result.error = f"Unknown role {role!r}."
             return result
         try:
@@ -679,14 +766,142 @@ class SupabaseBackend(Backend):
 
     def remove_profile(self, email: str) -> UpdateResult:
         result = UpdateResult()
-        if not email:
+        key = normalize_email(email)
+        if not key:
             result.error = "An email is required."
             return result
         try:
+            # Exact match, never a pattern: a wildcard here would delete every
+            # profile the pattern happens to match, not just the one chosen.
             response = (
-                self._admin.table("profiles").delete().ilike("email", email).execute()
+                self._admin.table("profiles").delete().eq("email", key).execute()
             )
             result.updated = len(response.data or [])
+        except Exception as exc:  # noqa: BLE001
+            result.error = f"{type(exc).__name__}: {exc}"
+        return result
+
+    # --- "This isn't ours" flags ---------------------------------------------
+    #
+    # Needs migrations/010_transaction_flags.sql, which has NOT been run against
+    # any database. Like the other Supabase methods added for the VP portal, this
+    # has never executed against a real Postgres instance. Reads go through the
+    # secret-key client like every other read since 008_lock_down.sql.
+
+    def fetch_flags(self, committee_ids: tuple[int, ...] | None = None) -> pd.DataFrame:
+        query = self._admin.table("transaction_flags").select("*")
+        if committee_ids is not None:
+            ids = [int(committee_id) for committee_id in committee_ids]
+            if not ids:
+                return pd.DataFrame()
+            query = query.in_("booked_to_committee_id", ids)
+        frame = pd.DataFrame(query.order("flag_id", desc=True).execute().data or [])
+        if frame.empty:
+            return frame
+        # Open first, then newest -- matching sqlite_backend.py. Sorted here
+        # because PostgREST orders by column, not by a CASE expression.
+        frame["_rank"] = frame["status"].map(lambda status: 0 if status == flags_domain.OPEN else 1)
+        return frame.sort_values("_rank", kind="stable").drop(columns="_rank")
+
+    def create_flag(
+        self,
+        transaction_id: int,
+        allowed_committee_ids: tuple[int, ...],
+        note: str,
+        actor: str,
+    ) -> UpdateResult:
+        result = UpdateResult()
+        cleaned, problem = flags_domain.clean_note(note)
+        if problem:
+            result.error = problem
+            return result
+
+        allowed = {int(committee_id) for committee_id in allowed_committee_ids}
+        try:
+            charge = (
+                self._admin.table("transactions")
+                .select("budget_category")
+                .eq("transactionid", int(transaction_id))
+                .maybe_single()
+                .execute()
+            )
+            if charge is None or charge.data is None:
+                result.error = f"Charge {transaction_id} does not exist."
+                return result
+            booked_to = charge.data.get("budget_category")
+            if booked_to is None or int(booked_to) not in allowed:
+                result.error = "That charge is not booked to your committee, so you cannot flag it."
+                return result
+
+            existing = (
+                self._admin.table("transaction_flags")
+                .select("flag_id")
+                .eq("transaction_id", int(transaction_id))
+                .eq("status", flags_domain.OPEN)
+                .execute()
+            )
+            if existing.data:
+                result.unchanged = 1
+                return result
+
+            self._admin.table("transaction_flags").insert(
+                {
+                    "transaction_id": int(transaction_id),
+                    "booked_to_committee_id": int(booked_to),
+                    "flagged_by": actor,
+                    "note": cleaned,
+                    "status": flags_domain.OPEN,
+                }
+            ).execute()
+            self._audit(
+                transaction_id=int(transaction_id),
+                action="flag",
+                actor=actor,
+                field="not our charge",
+                new_value=cleaned[:120],
+            )
+            result.updated = 1
+        except Exception as exc:  # noqa: BLE001
+            result.error = f"{type(exc).__name__}: {exc}"
+        return result
+
+    def resolve_flag(self, flag_id: int, status: str, actor: str, note: str = "") -> UpdateResult:
+        result = UpdateResult()
+        if status not in flags_domain.CLOSING_STATUSES:
+            result.error = f"Unknown status {status!r}."
+            return result
+        try:
+            existing = (
+                self._admin.table("transaction_flags")
+                .select("status,transaction_id")
+                .eq("flag_id", int(flag_id))
+                .maybe_single()
+                .execute()
+            )
+            if existing is None or existing.data is None:
+                result.error = f"Flag {flag_id} does not exist."
+                return result
+            if existing.data.get("status") != flags_domain.OPEN:
+                result.unchanged = 1
+                return result
+
+            self._admin.table("transaction_flags").update(
+                {
+                    "status": status,
+                    "resolved_at": _now(),
+                    "resolved_by": actor,
+                    "resolution_note": (note or "").strip() or None,
+                }
+            ).eq("flag_id", int(flag_id)).eq("status", flags_domain.OPEN).execute()
+            self._audit(
+                transaction_id=int(existing.data["transaction_id"]),
+                action="flag_resolved",
+                actor=actor,
+                field=f"flag {flag_id}",
+                old_value=flags_domain.OPEN,
+                new_value=status,
+            )
+            result.updated = 1
         except Exception as exc:  # noqa: BLE001
             result.error = f"{type(exc).__name__}: {exc}"
         return result

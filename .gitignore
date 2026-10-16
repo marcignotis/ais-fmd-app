@@ -4,6 +4,7 @@ __pycache__/
 sandbox_data/
 .pytest_cache/
 .streamlit/secrets.toml
+.scratch/
 
 # Anything pulled out of the live database. Holds member names against payment
 # amounts -- never commit it, however convenient it would be.
@@ -29,3 +30,11 @@ secrets.toml
 
 # Per-person Claude Code settings (local permissions, file paths).
 .claude/settings.local.json
+
+# Private exports (financial history, member databases). They hold names against
+# payment amounts. Keep them OUT of this folder; these rules are the safety net
+# for the day one lands here by accident.
+*.xlsx
+*.xls
+*.xlsm
+*private_test*

@@ -15,6 +15,16 @@
    - move the handbook's plain-text passwords into a password manager and rotate them
    - delete the test project and `C:\Users\durpy\fmd-test-run\` when no longer needed
 7. **The Cloud app runs Python 3.14.** The Pipfile asks for 3.12, and pipenv only warns. To match CI (3.11–3.13), redeploy with Python 3.12, or drop `[requires]` from the Pipfile.
+8. **AI features are off in production.** Categorization itself works without AI (card roster, rules and scoring: 124 of 200 rows in the test upload).
+   - **Model help for leftover rows:** add `OPENAI_API_KEY = "sk-..."` as a **top-level** Cloud secret. The local `.streamlit/secrets.toml` has an `[openai]` section, which the code does not read. The model defaults to `gpt-4.1-mini` (`AIS_FMD_LLM_MODEL`) and it costs money.
+   - **Spend review / "AI overview"** (`llm.review_spend`, PR #1): it flags booked transactions that don't fit their committee and never changes a category. It's in the code, but no page runs it. A side task is proposed: a treasurer-only "Check this term's spending" button, flag-only, with cached results.
+   - **Assistant:** it runs on its offline keyword router. The model-backed version (`assistant_model.py`) isn't in the codebase.
+
+## Running it
+
+- **Live app:** https://ais-fmd-app-bvyhbbycmpeuwbxwomb7au.streamlit.app (treasury password from the Cloud secrets). After inactivity Streamlit Cloud puts it to sleep; the first visit wakes it in about a minute.
+- **On this laptop (demo data, no live access):** `.venv/Scripts/python -m streamlit run app.py`. Sandbox mode is the default, with no password and generated data.
+- **On this laptop against the test project:** `C:\Users\durpy\fmd-test-run\run-test-app.ps1`. It needs a venv with `requirements-production.txt`; its path inside the script points at a temporary folder, so recreate the venv if it's gone.
 
 ## Projects
 

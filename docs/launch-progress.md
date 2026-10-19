@@ -1,6 +1,20 @@
 # Launch progress: moving the app onto live Supabase
 
-**Updated 2026-10-19.** Rehearsal complete on the test project, including the team's Fall 2026 work (PR #3, #5). **No changes have been made to the live database**, which is still byte-for-byte the 2026-10-15 backup. Deploy target: **Streamlit Community Cloud**.
+**LAUNCHED 2026-10-19.** The new app runs on Streamlit Community Cloud (treasuryufais workspace, branch `sandbox/mvp-rebuild`), reading the live Supabase project with the secret key. Every migration, including the `008` lock-down, is applied to live. All existing data is verified identical to the 2026-10-15 backup.
+
+## After launch: what's left
+
+1. **Upload the bank statements since 2026-01-22** in the new app. Until then, Home opens on Spring 2026, the latest term with transactions. Re-imported rows add nothing.
+2. **Google sign-in** (optional): create a Google OAuth client with redirect `https://ais-fmd-app-bvyhbbycmpeuwbxwomb7au.streamlit.app/oauth2callback`, fix the `[auth]` secrets (the Cloud log shows "misconfigured origin for `redirect_uri`"), and add the `profiles` table (migration 002's part plus 011) with a treasurer row. Rehearse on the test project first. Keep the password as a fallback.
+3. **Block budget edits in locked terms.** The lock covers transactions only; a side task is proposed.
+4. **Retire the two old Streamlit apps** (`ais-fmd`, `ais-fmd-app` on `main`). Their public key is disabled on live, so they can't read data.
+5. **Supabase account items** flagged by the advisor, all unrelated to the app: upgrade Postgres (15.8.1.085 has security patches; take a backup first, since it restarts the database), and the email-OTP expiry and leaked-password-protection settings for Supabase Auth, which the app doesn't use.
+6. **Housekeeping:**
+   - delete `C:\Users\durpy\fmd-cloud-secrets.toml`
+   - delete the duplicate `full.dump` in the Drive backup folder
+   - move the handbook's plain-text passwords into a password manager and rotate them
+   - delete the test project and `C:\Users\durpy\fmd-test-run\` when no longer needed
+7. **The Cloud app runs Python 3.14.** The Pipfile asks for 3.12, and pipenv only warns. To match CI (3.11–3.13), redeploy with Python 3.12, or drop `[requires]` from the Pipfile.
 
 ## Projects
 
@@ -70,7 +84,8 @@ May 6 to Jul 31, 2026 falls in no term, and so do 25 transactions from May 6 to 
 - Decision: **hold `008_lock_down` until the new app is deployed and signed into**, so nothing that works today breaks before the switch.
 - **Applied to live, with the treasurer's permission:** `001, 003, 005, 006, 007, 009, 010, 012`; natural_key backfill (2,802 keys, all distinct); the Fall 2026 term and 14 budgets ($13,100; dues 35/50/65); Fall 2022 through Spring 2026 locked (`locked_by = 'treasurer (launch 2026-10-19)'`).
 - **Verified after every step and at the end:** 2,802 transactions; net $18,050.43, income $130,526.17, expenses −$112,475.74; content fingerprint `7e7e67a8…`, category fingerprint `1f4382fd…`, and the original 125 budgets' fingerprint `7a24f0f2…` all identical to the 2026-10-15 backup.
-- **Not yet applied:** `008_lock_down`, held until the new app is deployed. An interim lock of only the new tables and RPCs was blocked by the permission check, so it awaits the treasurer's call. Until 008 runs, the new tables (`members`, `merchants`, `labeled_examples`, `transaction_audit`, `statement_balances`) and the two save RPCs are reachable with the publishable key. Keep `members` empty until then.
+- **PR #6 merged** (Pipfile, Review Queue protection). The Cloud app was rebooted, installed from the Pipfile (supabase included), and the treasurer signed in. Live's edge logs show the app reading every table through `python-httpx` with HTTP 200.
+- **`008_lock_down` applied to live** after that. The publishable key now gets HTTP 401 on all 11 tables and the save RPC. Every public table has RLS with no policies. The app kept reading successfully after 008, and the data fingerprints still match the backup.
 - **Known gap:** a locked term blocks transaction imports and edits, but **not budget edits**. The budget editor doesn't check the lock yet.
 
 ## Next: live switch-over (each step needs the treasurer's OK)

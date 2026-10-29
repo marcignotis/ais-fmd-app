@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Stop hook: when Claude finishes a turn, commit any uncommitted work as a WIP
+# commit and push the branch, so the other machine can pick it up.
+# Skips main, detached HEAD, and in-progress merges/rebases. Never fails the turn.
+
+cd "$CLAUDE_PROJECT_DIR" 2>/dev/null || exit 0
+git rev-parse --git-dir >/dev/null 2>&1 || exit 0
+
+msg() { printf '{"systemMessage": "[sync] %s"}\n' "$1"; exit 0; }
+
+branch=$(git symbolic-ref --short -q HEAD)
+[ -z "$branch" ] && exit 0
+case "$branch" in main|master) exit 0 ;; esac
+
+gitdir=$(git rev-parse --git-dir)
+for f in MERGE_HEAD REBASE_HEAD CHERRY_PICK_HEAD rebase-merge rebase-apply; do
+  [ -e "$gitdir/$f" ] && exit 0
+done
+
+if [ -n "$(git status --porcelain)" ]; then
+  git add -A
+  git commit --quiet -m "WIP: auto-sync from $(hostname)" \
+    -m "Made by the Claude Code Stop hook; squash before merging." || msg "WIP commit failed on $branch; changes left uncommitted."
+fi
+
+if git rev-parse -q --verify "@{u}" >/dev/null 2>&1; then
+  [ "$(git rev-list --count @{u}..HEAD)" -eq 0 ] && exit 0
+  git push --quiet 2>/dev/null || msg "Push of $branch failed (GitHub may have newer commits). Pull before continuing."
+else
+  git push --quiet -u origin "$branch" 2>/dev/null || msg "First push of $branch failed."
+fi
+msg "Pushed $branch to GitHub."

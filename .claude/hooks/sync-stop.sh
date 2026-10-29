@@ -10,7 +10,9 @@ msg() { printf '{"systemMessage": "[sync] %s"}\n' "$1"; exit 0; }
 
 branch=$(git symbolic-ref --short -q HEAD)
 [ -z "$branch" ] && exit 0
-case "$branch" in main|master) exit 0 ;; esac
+# main, and the branch Streamlit Cloud deploys from, are never auto-pushed:
+# a WIP commit there would redeploy the live app without review.
+case "$branch" in main|master|sandbox/mvp-rebuild|design/*) exit 0 ;; esac
 
 gitdir=$(git rev-parse --git-dir)
 for f in MERGE_HEAD REBASE_HEAD CHERRY_PICK_HEAD rebase-merge rebase-apply; do

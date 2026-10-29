@@ -146,8 +146,18 @@ with tab_upload:
                 # --- Categorize -------------------------------------------
                 # Per-term rates, so a statement from a term with its own dues
                 # rate is categorized against that rate and not a stale default.
-                schedule = dues.schedule_from_terms(repo.load_terms())
-                categorized, run = categorize_frame(parsed.rows, dues=schedule)
+                # Held per file: every cell edit in the preview reruns this page,
+                # and the residual pass is a round of model calls in production.
+                upload_key = (file_name, uploaded.size, repo.data_version())
+                upload_memo = st.session_state.get("_upload_categorized")
+                if upload_memo is not None and upload_memo[0] == upload_key:
+                    categorized, run = upload_memo[1]
+                else:
+                    schedule = dues.schedule_from_terms(repo.load_terms())
+                    with st.spinner("Categorizing…"):
+                        categorized, run = categorize_frame(parsed.rows, dues=schedule)
+                    st.session_state["_upload_categorized"] = (upload_key, (categorized, run))
+                categorized = categorized.copy()
 
                 counts = run.counts_by_source
                 summary_columns = st.columns(4)
@@ -218,7 +228,9 @@ with tab_upload:
 
                     edited = st.data_editor(
                         preview_display,
-                        key="upload_preview_editor",
+                        # Per file: staged edits are stored by row position, so a
+                        # second file must not inherit the first one's edits.
+                        key=f"upload_preview_editor_{file_name}_{uploaded.size}",
                         width="stretch",
                         hide_index=True,
                         disabled=["Date", "Amount", "Details", "Matched by"],
@@ -258,15 +270,16 @@ with tab_upload:
                         if not receipt.ok:
                             shell.error_state("Import failed — nothing was written", receipt.error or "")
                         else:
-                            st.success(
+                            shell.flash(
+                                "success",
                                 f"Imported {receipt.inserted} transaction(s) from {file_name}."
                                 + (
                                     f" {receipt.duplicates_skipped} rejected as duplicates by the database."
                                     if receipt.duplicates_skipped
                                     else ""
                                 )
+                                + " Next: open the Review Queue for anything left uncategorized.",
                             )
-                            st.balloons()
                             st.rerun()
 
     st.markdown('<hr class="ais-rule" />', unsafe_allow_html=True)
@@ -328,7 +341,7 @@ with tab_budgets:
             if result.error:
                 shell.error_state("Could not save budgets", result.error)
             else:
-                st.success(
+                shell.flash("success",
                     f"Saved. {result.updated} allocation(s) changed, "
                     f"{result.unchanged} already matched."
                 )
@@ -429,7 +442,7 @@ with tab_terms:
                     elif result.unchanged:
                         shell.notify("info", f"{rate_term} already had those rates.")
                     else:
-                        st.success(f"Saved dues rates for {rate_term}.")
+                        shell.flash("success", f"Saved dues rates for {rate_term}.")
                         st.rerun()
 
     st.markdown('<hr class="ais-rule" />', unsafe_allow_html=True)
@@ -492,7 +505,7 @@ with tab_terms:
                 elif result.unchanged:
                     shell.notify("info", f"{goal_term} already had that goal.")
                 else:
-                    st.success(f"Saved sponsorship goal for {goal_term}.")
+                    shell.flash("success", f"Saved sponsorship goal for {goal_term}.")
                     st.rerun()
 
     # --- Sponsorship history, all terms at a glance ---------------------------
@@ -604,7 +617,7 @@ with tab_terms:
                             if errors:
                                 shell.error_state("Some sponsor names could not be saved", errors[0])
                             else:
-                                st.success("Saved.")
+                                shell.flash("success", "Saved.")
                                 st.rerun()
 
     st.markdown('<hr class="ais-rule" />', unsafe_allow_html=True)
@@ -655,7 +668,7 @@ with tab_terms:
                 if result.error:
                     shell.error_state("Could not change the term", result.error)
                 else:
-                    st.success(
+                    shell.flash("success",
                         f"{lock_target} is now "
                         f"{'open' if currently_locked else 'closed'}."
                     )
@@ -693,7 +706,7 @@ with tab_terms:
             if result.error:
                 shell.error_state("Could not add the term", result.error)
             else:
-                st.success(f"Added {term_id.strip()}.")
+                shell.flash("success", f"Added {term_id.strip()}.")
                 st.rerun()
 
 # ============================================================================

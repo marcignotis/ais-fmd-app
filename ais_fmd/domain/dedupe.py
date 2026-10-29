@@ -35,7 +35,10 @@ import hashlib
 import re
 from collections import Counter
 from dataclasses import dataclass, field
+from datetime import date, datetime
 from typing import Sequence
+
+import pandas as pd
 
 from ..config.categories import normalize_account
 from .money import parse_amount
@@ -48,12 +51,26 @@ def _normalize_details(details: object) -> str:
     return _WHITESPACE.sub(" ", text).strip().lower()
 
 
+def _date_text(value: object) -> str:
+    """
+    The date as YYYY-MM-DD however it arrives.
+
+    Parsers emit strings, but rows read back from either backend carry pandas
+    Timestamps, whose str() is '2026-01-22 00:00:00' -- so a stored row never
+    matched its own re-upload. Strings are left exactly as they were: every
+    stored natural_key was hashed from them.
+    """
+    if isinstance(value, (datetime, date)) and value is not pd.NaT:
+        return value.strftime("%Y-%m-%d")
+    return str(value or "").strip()
+
+
 def identity_tuple(record: dict) -> tuple[str, str, str, str]:
     """The part of a transaction that makes it 'the same transaction'."""
     amount = parse_amount(record.get("amount"))
     amount_text = "none" if amount is None else f"{amount:.2f}"
     return (
-        str(record.get("transaction_date") or "").strip(),
+        _date_text(record.get("transaction_date")),
         amount_text,
         _normalize_details(record.get("details")),
         str(normalize_account(record.get("account")) or "").lower(),

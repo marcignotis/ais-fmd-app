@@ -165,8 +165,20 @@ st.markdown('<hr class="ais-rule" />', unsafe_allow_html=True)
 # card roster and rules would do now, which may differ from when they were
 # first imported.
 
-records = pending.to_dict("records")
-run = categorize_records(records, dues=dues.schedule_from_terms(repo.load_terms()))
+#
+# Held per session until the data or the pending set changes: every radio,
+# slider and sort on this page reruns the script, and in production the
+# pipeline's residual pass is a round of model calls each time.
+_RUN_MEMO = "_review_queue_run"
+run_key = (repo.data_version(), tuple(int(i) for i in pending["transactionid"]))
+memo = st.session_state.get(_RUN_MEMO)
+if memo is not None and memo[0] == run_key:
+    run = memo[1]
+else:
+    records = pending.to_dict("records")
+    with st.spinner("Scoring the queue…"):
+        run = categorize_records(records, dues=dues.schedule_from_terms(repo.load_terms()))
+    st.session_state[_RUN_MEMO] = (run_key, run)
 
 # A row the confidence gate held back has no classification, but it does have a
 # scored proposal — the committee the evidence favoured, how sure it was, and
@@ -463,7 +475,7 @@ if submitted:
                     )
                     message += f" Logged {label_result.updated} for training"
                     message += f" ({overrides} overrode the suggestion)." if overrides else "."
-            st.success(message)
+            shell.flash("success", message)
             st.rerun()
 
 # --- Confidence distribution -------------------------------------------------

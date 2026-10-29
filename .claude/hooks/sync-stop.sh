@@ -17,17 +17,20 @@ for f in MERGE_HEAD REBASE_HEAD CHERRY_PICK_HEAD rebase-merge rebase-apply; do
   [ -e "$gitdir/$f" ] && exit 0
 done
 
-# The repo is public and real bank statements live near it, so new files are
-# only auto-added when they can't be statement or export data. Anything held
-# back is named in the message for the user to add (or ignore) by hand.
+# The repo is public and real bank statements live near it, so a NEW file is
+# auto-added only when it is a source or doc type (an allowlist: an export can
+# take any extension). JSON counts only where config lives. Anything held back
+# is named in the message for the user to add (or ignore) by hand.
 held=""
 if [ -n "$(git status --porcelain)" ]; then
   git add -u
   while IFS= read -r f; do
     [ -z "$f" ] && continue
-    case "$(printf '%s' "$f" | tr '[:upper:]' '[:lower:]')" in
-      *.csv|*.tsv|*.pdf|*.ofx|*.qfx|*.qbo|*.xls|*.xlsx|*.xlsm|*.db|*.sqlite|*.sqlite3|*.zip|*.json.bak)
-        held="$held $f"; continue ;;
+    lower=$(printf '%s' "$f" | tr '[:upper:]' '[:lower:]')
+    case "$lower" in
+      *.py|*.md|*.sql|*.sh|*.toml|*.yml|*.yaml|*.ini|*.cfg|*.css|pipfile|pipfile.lock|requirements*.txt|.gitignore|.gitattributes|*/.gitignore|.github/*) ;;
+      ais_fmd/config/*.json|.claude/*.json|.claude/*/*.json) ;;
+      *) held="$held $f"; continue ;;
     esac
     if [ "$(wc -c < "$f")" -gt 1000000 ]; then held="$held $f"; continue; fi
     git add -- "$f"

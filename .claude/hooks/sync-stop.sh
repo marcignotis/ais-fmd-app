@@ -17,16 +17,35 @@ for f in MERGE_HEAD REBASE_HEAD CHERRY_PICK_HEAD rebase-merge rebase-apply; do
   [ -e "$gitdir/$f" ] && exit 0
 done
 
+# The repo is public and real bank statements live near it, so new files are
+# only auto-added when they can't be statement or export data. Anything held
+# back is named in the message for the user to add (or ignore) by hand.
+held=""
 if [ -n "$(git status --porcelain)" ]; then
-  git add -A
-  git commit --quiet -m "WIP: auto-sync from $(hostname)" \
-    -m "Made by the Claude Code Stop hook; squash before merging." || msg "WIP commit failed on $branch; changes left uncommitted."
+  git add -u
+  while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    case "$(printf '%s' "$f" | tr '[:upper:]' '[:lower:]')" in
+      *.csv|*.tsv|*.pdf|*.ofx|*.qfx|*.qbo|*.xls|*.xlsx|*.xlsm|*.db|*.sqlite|*.sqlite3|*.zip|*.json.bak)
+        held="$held $f"; continue ;;
+    esac
+    if [ "$(wc -c < "$f")" -gt 1000000 ]; then held="$held $f"; continue; fi
+    git add -- "$f"
+  done < <(git ls-files --others --exclude-standard)
+  if ! git diff --cached --quiet; then
+    git commit --quiet -m "WIP: auto-sync from $(hostname)" \
+      -m "Made by the Claude Code Stop hook; squash before merging." || msg "WIP commit failed on $branch; changes left uncommitted."
+  fi
 fi
+[ -n "$held" ] && held_note=" Not auto-committed (possible data files):$held" || held_note=""
 
 if git rev-parse -q --verify "@{u}" >/dev/null 2>&1; then
-  [ "$(git rev-list --count @{u}..HEAD)" -eq 0 ] && exit 0
-  git push --quiet 2>/dev/null || msg "Push of $branch failed (GitHub may have newer commits). Pull before continuing."
+  if [ "$(git rev-list --count @{u}..HEAD)" -eq 0 ]; then
+    [ -n "$held_note" ] && msg "${held_note# }"
+    exit 0
+  fi
+  git push --quiet 2>/dev/null || msg "Push of $branch failed (GitHub may have newer commits). Pull before continuing.$held_note"
 else
-  git push --quiet -u origin "$branch" 2>/dev/null || msg "First push of $branch failed."
+  git push --quiet -u origin "$branch" 2>/dev/null || msg "First push of $branch failed.$held_note"
 fi
-msg "Pushed $branch to GitHub."
+msg "Pushed $branch to GitHub.$held_note"
